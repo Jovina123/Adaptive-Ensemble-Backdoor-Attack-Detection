@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Backdoor Detection Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --panel2:#1e2230; --border:#2a2f3d;
+    --text:#e6e8ef; --muted:#8b91a5; --accent:#5b8cff; --accent2:#22c55e;
+    --danger:#ef4444; --warn:#f59e0b;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--text);}
+  header{padding:20px 28px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+  header h1{font-size:18px;margin:0;font-weight:600;}
+  header .sub{color:var(--muted);font-size:12px;margin-top:4px;}
+  .wrap{display:grid;grid-template-columns:380px 1fr;gap:20px;padding:20px 28px;align-items:start;}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:18px;}
+  .panel h2{font-size:14px;margin:0 0 14px 0;color:var(--text);display:flex;align-items:center;gap:8px;}
+  .panel h2 .n{background:var(--accent);color:#fff;border-radius:50%;width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px;}
+  select, input[type=text], input[type=number]{
+    width:100%;background:var(--panel2);border:1px solid var(--border);color:var(--text);
+    padding:8px 10px;border-radius:6px;font-size:13px;
+  }
+  input[type=file]{width:100%;font-size:12px;color:var(--muted);}
+  .row{display:flex;gap:10px;}
+  .row > *{flex:1;}
+  .radio-group{display:flex;flex-direction:column;gap:6px;margin-top:6px;}
+  .radio-group label{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);cursor:pointer;margin:0;}
+  .radio-group input{width:auto;}
+  button{
+    background:var(--accent);color:#fff;border:none;border-radius:6px;padding:9px 14px;
+    font-size:13px;font-weight:600;cursor:pointer;margin-top:12px;width:100%;
+  }
+  button.secondary{background:var(--panel2);border:1px solid var(--border);color:var(--text);}
+  button.success{background:var(--accent2);}
+  button:disabled{opacity:.5;cursor:not-allowed;}
+  .hint{color:var(--muted);font-size:11px;margin-top:6px;line-height:1.4;}
+  .status-badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:999px;background:var(--panel2);border:1px solid var(--border);}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);}
+  .dot.running{background:var(--warn);animation:pulse 1s infinite;}
+  .dot.idle{background:var(--accent2);}
+  .dot.error{background:var(--danger);}
+  @keyframes pulse{0%{opacity:1}50%{opacity:.3}100%{opacity:1}}
+  #log{
+    background:#0a0c12;border:1px solid var(--border);border-radius:8px;padding:12px;
+    height:220px;overflow-y:auto;font-family:Consolas,Menlo,monospace;font-size:11.5px;color:#9fe3a8;
+    white-space:pre-wrap;
+  }
+  .progress-bar{background:var(--panel2);border-radius:6px;height:8px;overflow:hidden;margin-top:8px;}
+  .progress-bar > div{background:var(--accent);height:100%;width:0%;transition:width .3s;}
+  .stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:6px;}
+  .stat{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center;}
+  .stat .v{font-size:20px;font-weight:700;}
+  .stat .l{font-size:11px;color:var(--muted);margin-top:2px;}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px;}
+  th,td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);}
+  th{color:var(--muted);font-weight:500;}
+  tr.flagged{background:rgba(239,68,68,.12);}
+  tr.flagged td:first-child{font-weight:700;color:var(--danger);}
+  .chart-wrap{margin-top:10px;}
+  .bar-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
+  .bar-label{width:34px;font-size:11px;color:var(--muted);text-align:right;}
+  .bar-track{flex:1;background:var(--panel2);border-radius:4px;height:12px;overflow:hidden;}
+  .bar-fill{height:100%;background:var(--accent);}
+  .bar-fill.flagged{background:var(--danger);}
+  .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-top:14px;}
+  .card{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:8px;}
+  .card.flagged{border-color:var(--danger);}
+  .card img{width:100%;border-radius:4px;background:#000;image-rendering:pixelated;}
+  .card .cap{font-size:11px;color:var(--muted);margin-top:6px;display:flex;justify-content:space-between;}
+  .badge-flag{background:var(--danger);color:#fff;font-size:10px;padding:1px 6px;border-radius:4px;}
+  .empty{color:var(--muted);font-size:13px;text-align:center;padding:30px 0;}
+  .tabs{display:flex;gap:8px;margin-bottom:10px;}
+  .tab{background:var(--panel2);border:1px solid var(--border);padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;color:var(--muted);}
+  .tab.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Adaptive Ensemble Backdoor Detection</h1>
+    <div class="sub">Upload a dataset &rarr; train / poison &rarr; run the Neural-Cleanse style detector</div>
+  </div>
+  <span class="status-badge"><span class="dot idle" id="statusDot"></span><span id="statusText">idle</span></span>
+</header>
+
+<div class="wrap">
+  <!-- LEFT: controls -->
+  <div>
+
+    <div class="panel">
+      <h2><span class="n">1</span> Dataset</h2>
+      <label>Upload a .h5 dataset</label>
+      <input type="file" id="fileInput" accept=".h5">
+      <div class="hint">Expected keys: X_train, Y_train, X_test, Y_test (one-hot labels). For detection-only you can get away with just X_test/Y_test.</div>
+      <button id="uploadBtn" class="secondary">Upload</button>
+
+      <label style="margin-top:16px;">Or pick an existing dataset</label>
+      <select id="datasetSelect"></select>
+      <div class="hint" id="datasetInfo"></div>
+    </div>
+
+    <div class="panel">
+      <h2><span class="n">2</span> Dataset condition</h2>
+      <div class="radio-group">
+        <label><input type="radio" name="dsmode" value="already_poisoned" checked> Already poisoned &mdash; just train on it as-is</label>
+        <label><input type="radio" name="dsmode" value="clean_baseline"> Clean dataset &mdash; train a clean baseline (no poisoning)</label>
+        <label><input type="radio" name="dsmode" value="poison_now"> Clean dataset &mdash; poison it now (inject a backdoor)</label>
+      </div>
+
+      <div id="poisonOpts" style="display:none;margin-top:10px;">
+        <label>Target label(s), comma-separated</label>
+        <input type="text" id="targetLabels" value="0">
+        <div class="row">
+          <div>
+            <label>Pattern size</label>
+            <input type="number" id="patternSize" value="4">
+          </div>
+          <div>
+            <label>Margin</label>
+            <input type="number" id="margin" value="1">
+          </div>
+        </div>
+        <label>Inject / poison ratio (0-1)</label>
+        <input type="number" id="injectRatio" value="0.2" step="0.05" min="0" max="1">
+        <div class="hint">Poisoning happens on-the-fly during training (recommended). Use the button below only if you also want a standalone poisoned .h5 file.</div>
+        <button id="makePoisonedFileBtn" class="secondary">Also save a static poisoned dataset file</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2><span class="n">3</span> Train</h2>
+      <label>Model name</label>
+      <input type="text" id="modelName" value="my_model.h5">
+      <label>Epochs</label>
+      <input type="number" id="epochs" value="10" min="1">
+      <button id="trainBtn">Train Model</button>
+      <div class="hint">Or skip training and use an existing model file below.</div>
+    </div>
+
+    <div class="panel">
+      <h2><span class="n">4</span> Run Detector</h2>
+      <label>Model to inspect</label>
+      <select id="modelSelect"></select>
+      <label>Dataset for reverse-engineering (test split used)</label>
+      <select id="detectDatasetSelect"></select>
+      <div class="row">
+        <div>
+          <label>Optimization steps / label</label>
+          <input type="number" id="steps" value="200" min="10">
+        </div>
+        <div>
+          <label>Batch size</label>
+          <input type="number" id="batchSize" value="32">
+        </div>
+      </div>
+      <div class="hint">Runs Neural-Cleanse-style trigger reverse-engineering for every class, then flags outliers with MAD. This can take a while (steps &times; num_classes).</div>
+      <button id="detectBtn" class="success">Run Detector</button>
+    </div>
+
+  </div>
+
+  <!-- RIGHT: live status + results -->
+  <div>
+    <div class="panel">
+      <h2>Live Log</h2>
+      <div class="progress-bar"><div id="progressFill"></div></div>
+      <div class="hint" id="progressText">idle</div>
+      <div id="log" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="panel" id="resultsPanel">
+      <h2>Detection Results</h2>
+      <div id="resultsBody"><div class="empty">Run the detector to see results here.</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let pollTimer = null;
+let lastLogCount = 0;
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+// ---------- dataset / model list refresh ----------
+
+async function refreshDatasets() {
+  const list = await api('/api/datasets');
+  const selects = [$('datasetSelect'), $('detectDatasetSelect')];
+  selects.forEach(sel => {
+    const prev = sel.value;
+    sel.innerHTML = '';
+    if (list.length === 0) {
+      sel.innerHTML = '<option value="">(no datasets uploaded yet)</option>';
+    }
+    list.forEach(ds => {
+      const opt = document.createElement('option');
+      opt.value = ds.name;
+      const classes = ds.num_classes ? (ds.num_classes + ' classes') : '?';
+      opt.textContent = ds.name + '  [' + classes + ']';
+      sel.appendChild(opt);
+    });
+    if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  });
+  updateDatasetInfo(list);
+}
+
+function updateDatasetInfo(list) {
+  const name = $('datasetSelect').value;
+  const ds = list.find(d => d.name === name);
+  $('datasetInfo').textContent = ds
+    ? 'keys: ' + ds.keys.join(', ') + ' | shapes: ' + JSON.stringify(ds.shapes)
+    : '';
+}
+
+async function refreshModels() {
+  const list = await api('/api/models');
+  const sel = $('modelSelect');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  if (list.length === 0) {
+    sel.innerHTML = '<option value="">(no models trained yet)</option>';
+  }
+  list.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m; opt.textContent = m;
+    sel.appendChild(opt);
+  });
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+$('datasetSelect').addEventListener('change', async () => {
+  const list = await api('/api/datasets');
+  updateDatasetInfo(list);
+});
+
+// ---------- dataset condition radio ----------
+
+document.querySelectorAll('input[name=dsmode]').forEach(r => {
+  r.addEventListener('change', () => {
+    $('poisonOpts').style.display = (r.value === 'poison_now' && r.checked) ? 'block' : 'none';
+  });
+});
+
+// ---------- upload ----------
+
+$('uploadBtn').addEventListener('click', async () => {
+  const f = $('fileInput').files[0];
+  if (!f) { alert('Choose a .h5 file first'); return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  $('uploadBtn').disabled = true;
+  $('uploadBtn').textContent = 'Uploading...';
+  try {
+    await api('/api/upload', { method: 'POST', body: fd });
+    await refreshDatasets();
+    $('datasetSelect').value = f.name;
+  } catch (e) {
+    alert('Upload failed: ' + e.message);
+  } finally {
+    $('uploadBtn').disabled = false;
+    $('uploadBtn').textContent = 'Upload';
+  }
+});
+
+// ---------- static poisoned file ----------
+
+$('makePoisonedFileBtn').addEventListener('click', async () => {
+  const dataset = $('datasetSelect').value;
+  if (!dataset) { alert('Pick a dataset first'); return; }
+  try {
+    const r = await api('/api/poison', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(poisonPayload(dataset))
+    });
+    startPolling();
+    alert('Poisoning started. Result will be saved as: ' + r.out_name);
+  } catch (e) { alert(e.message); }
+});
+
+function poisonPayload(dataset) {
+  return {
+    dataset,
+    target_labels: $('targetLabels').value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
+    pattern_size: parseInt($('patternSize').value, 10),
+    margin: parseInt($('margin').value, 10),
+    poison_ratio: parseFloat($('injectRatio').value),
+  };
+}
+
+// ---------- train ----------
+
+$('trainBtn').addEventListener('click', async () => {
+  const dataset = $('datasetSelect').value;
+  if (!dataset) { alert('Pick a dataset first'); return; }
+  const mode = document.querySelector('input[name=dsmode]:checked').value;
+  const payload = {
+    dataset,
+    model_name: $('modelName').value || undefined,
+    mode: mode === 'poison_now' ? 'poison' : 'clean',
+    epochs: parseInt($('epochs').value, 10),
+    target_labels: $('targetLabels').value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
+    pattern_size: parseInt($('patternSize').value, 10),
+    margin: parseInt($('margin').value, 10),
+    inject_ratio: parseFloat($('injectRatio').value),
+  };
+  try {
+    await api('/api/train', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    startPolling();
+  } catch (e) { alert(e.message); }
+});
+
+// ---------- detect ----------
+
+$('detectBtn').addEventListener('click', async () => {
+  const dataset = $('detectDatasetSelect').value;
+  const model = $('modelSelect').value;
+  if (!dataset || !model) { alert('Pick both a dataset and a model'); return; }
+  const payload = {
+    dataset, model,
+    steps: parseInt($('steps').value, 10),
+    batch_size: parseInt($('batchSize').value, 10),
+  };
+  try {
+    $('resultsBody').innerHTML = '<div class="empty">Running...</div>';
+    await api('/api/detect', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    startPolling();
+  } catch (e) { alert(e.message); }
+});
+
+// ---------- status polling ----------
+
+function startPolling() {
+  if (pollTimer) return;
+  lastLogCount = 0;
+  $('log').innerHTML = '';
+  pollTimer = setInterval(poll, 1000);
+  poll();
+}
+
+async function poll() {
+  const s = await api('/api/status');
+
+  const dot = $('statusDot');
+  dot.className = 'dot ' + (s.error ? 'error' : (s.running ? 'running' : 'idle'));
+  $('statusText').textContent = s.error ? ('error: ' + s.error) : (s.running ? (s.kind + '...') : 'idle');
+
+  const logDiv = $('log');
+  for (let i = lastLogCount; i < s.logs.length; i++) {
+    logDiv.textContent += s.logs[i] + '\n';
+  }
+  lastLogCount = s.logs.length;
+  logDiv.scrollTop = logDiv.scrollHeight;
+
+  const p = s.progress || {done:0, total:0, stage:''};
+  const pct = p.total ? Math.round(100 * p.done / p.total) : 0;
+  $('progressFill').style.width = pct + '%';
+  $('progressText').textContent = p.total ? (p.stage + ': ' + p.done + '/' + p.total + ' (' + pct + '%)') : 'idle';
+
+  if (!s.running) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+    refreshModels();
+    refreshDatasets();
+    if (s.kind === 'detect' && s.result) {
+      renderResults(s.result);
+    }
+  }
+}
+
+// ---------- results rendering ----------
+
+function renderResults(result) {
+  const { outlier, per_label } = result;
+  const flaggedSet = new Set(outlier.flagged.map(f => f.label));
+  const maxNorm = Math.max(...per_label.map(p => p.l1_norm));
+
+  let html = '';
+  html += '<div class="stat-grid">';
+  html += stat(per_label.length, 'classes scanned');
+  html += stat(outlier.flagged.length, 'flagged as backdoored');
+  html += stat(outlier.median.toFixed(1), 'median L1 norm');
+  html += '</div>';
+
+  if (outlier.flagged.length) {
+    html += '<p style="color:var(--danger);font-size:13px;margin-top:14px;">Likely backdoored label(s): '
+      + outlier.flagged.map(f => f.label).join(', ') + '</p>';
+  } else {
+    html += '<p style="color:var(--accent2);font-size:13px;margin-top:14px;">No label flagged as an outlier &mdash; no strong evidence of a backdoor.</p>';
+  }
+
+  html += '<div class="chart-wrap">';
+  per_label.forEach(p => {
+    const pct = maxNorm ? (100 * p.l1_norm / maxNorm) : 0;
+    html += '<div class="bar-row">'
+      + '<div class="bar-label">' + p.label + '</div>'
+      + '<div class="bar-track"><div class="bar-fill' + (p.flagged ? ' flagged' : '') + '" style="width:' + pct + '%"></div></div>'
+      + '</div>';
+  });
+  html += '</div>';
+
+  html += '<table><thead><tr><th>Label</th><th>L1 norm</th><th>Anomaly score</th><th>Status</th></tr></thead><tbody>';
+  const scoreByLabel = {};
+  outlier.flagged.forEach(f => scoreByLabel[f.label] = f.anomaly_score);
+  per_label.slice().sort((a,b) => a.l1_norm - b.l1_norm).forEach(p => {
+    html += '<tr class="' + (p.flagged ? 'flagged' : '') + '">'
+      + '<td>' + p.label + '</td>'
+      + '<td>' + p.l1_norm.toFixed(2) + '</td>'
+      + '<td>' + (scoreByLabel[p.label] !== undefined ? scoreByLabel[p.label].toFixed(2) : '-') + '</td>'
+      + '<td>' + (p.flagged ? 'FLAGGED' : 'normal') + '</td>'
+      + '</tr>';
+  });
+  html += '</tbody></table>';
+
+  html += '<div class="gallery">';
+  per_label.forEach(p => {
+    html += '<div class="card' + (p.flagged ? ' flagged' : '') + '">'
+      + '<img src="/results/' + p.fusion_img + '" loading="lazy">'
+      + '<div class="cap"><span>label ' + p.label + '</span>' + (p.flagged ? '<span class="badge-flag">FLAG</span>' : '<span>' + p.l1_norm.toFixed(0) + '</span>') + '</div>'
+      + '</div>';
+  });
+  html += '</div>';
+
+  $('resultsBody').innerHTML = html;
+}
+
+function stat(v, l) {
+  return '<div class="stat"><div class="v">' + v + '</div><div class="l">' + l + '</div></div>';
+}
+
+// ---------- init ----------
+
+refreshDatasets();
+refreshModels();
+poll(); // pick up a job already in progress if the page was reloaded
+setInterval(() => { if (!pollTimer) { refreshDatasets(); refreshModels(); } }, 8000);
+</script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+build/
+dist/
+
+# --- Virtual environment ---
+venv/
+env/
+.venv/
+
+# --- Dashboard server logs (from manual/background runs) ---
+server.log
+server_out.log
+server_err.log
+*.log
+
+# --- Dashboard generated output ---
+webapp/results/
+
+# --- Datasets & trained models (large binaries, uploaded/generated at runtime) ---
+data/*.h5
+models/*.h5
+
+# --- Legacy result dirs used by the original CLI scripts ---
+results/
+tmp/
+
+# --- Misc ---
+*.json
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
