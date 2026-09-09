@@ -256,6 +256,8 @@ def api_detect():
     model = body.get('model')
     steps = int(body.get('steps', 200))
     batch_size = int(body.get('batch_size', 32))
+    labels_to_scan = body.get('labels_to_scan')  # optional list of ints
+    true_backdoor_labels = body.get('true_backdoor_labels')  # optional ground-truth list of ints
 
     if not dataset or not model:
         return jsonify({'error': 'dataset and model are required'}), 400
@@ -272,6 +274,8 @@ def api_detect():
     ok, err = _run_in_background('detect', pipeline.run_detection, {
         'model_path': model_path, 'dataset_path': dataset_path, 'run_id': run_id,
         'steps': steps, 'batch_size': batch_size,
+        'labels_to_scan': [int(t) for t in labels_to_scan] if labels_to_scan else None,
+        'true_backdoor_labels': [int(t) for t in true_backdoor_labels] if true_backdoor_labels else None,
     })
     if not ok:
         return jsonify({'error': err}), 409

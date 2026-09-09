@@ -23,6 +23,22 @@ Every long-running function takes a `log` callback (str -> None) and a
 import os
 import sys
 import random
+import json
+
+# --------------------------------------------------------------------------- #
+# CPU thread limits. These MUST be set before numpy/scipy/tensorflow are
+# imported, since that's when the BLAS libraries (OpenBLAS/MKL) read them and
+# spin up their thread pools. Override any of them with a real environment
+# variable set before starting the server (e.g. `$env:AEBAD_CPU_THREADS=1`)
+# if you want a different value without editing this file.
+# --------------------------------------------------------------------------- #
+CPU_THREADS = os.environ.get('AEBAD_CPU_THREADS', '4')
+os.environ.setdefault('AEBAD_CPU_THREADS', CPU_THREADS)
+os.environ.setdefault('OMP_NUM_THREADS', CPU_THREADS)
+os.environ.setdefault('OPENBLAS_NUM_THREADS', CPU_THREADS)
+os.environ.setdefault('MKL_NUM_THREADS', CPU_THREADS)
+os.environ.setdefault('NUMEXPR_NUM_THREADS', CPU_THREADS)
+CPU_THREADS = int(CPU_THREADS)
 
 import numpy as np
 import h5py
@@ -60,6 +76,23 @@ def _noop_progress(done, total, stage=''):
     pass
 
 
+def _meta_path(model_path):
+    """Sidecar JSON file storing training ground-truth next to a saved model."""
+    return model_path + '.meta.json'
+
+
+def load_model_meta(model_path):
+    """Return the training metadata dict for a model, or None if not found/unreadable."""
+    path = _meta_path(model_path)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r') as f:
+            return json.load(f)
+    except (ValueError, OSError):
+        return None
+
+
 # --------------------------------------------------------------------------- #
 # TensorFlow / Keras session handling
 #
@@ -70,9 +103,8 @@ def _noop_progress(done, total, stage=''):
 
 # Max CPU threads TF is allowed to use. Override with the AEBAD_CPU_THREADS
 # env var (e.g. `set AEBAD_CPU_THREADS=1` before starting the server) if it's
-# still too heavy. Defaults to 2, which keeps training/detection usable
-# without pinning every core.
-CPU_THREADS = int(os.environ.get('AEBAD_CPU_THREADS', '2'))
+# still too heavy. (Value is already resolved and BLAS-related env vars set
+# near the top of this file, before numpy/tensorflow were imported.)
 
 
 def new_session():
@@ -317,6 +349,18 @@ def train_model(dataset_path, model_name, mode='clean', target_labels=None,
             model.save(model_path)
             log('Model saved to %s' % model_path)
 
+            meta = {
+                'mode': mode,
+                'true_backdoor_labels': target_labels if mode == 'poison' else [],
+                'pattern_size': pattern_size if mode == 'poison' else None,
+                'margin': margin if mode == 'poison' else None,
+                'inject_ratio': inject_ratio if mode == 'poison' else None,
+                'dataset_path': dataset_path,
+                'metrics': metrics,
+            }
+            with open(_meta_path(model_path), 'w') as f:
+                json.dump(meta, f, indent=2)
+
     return {'model_path': model_path, 'input_shape': list(input_shape),
             'num_classes': int(num_classes), 'metrics': metrics}
 
@@ -347,12 +391,77 @@ def outlier_detection(l1_norm_list, labels):
             'anomaly_index': float(anomaly_index), 'flagged': flagged}
 
 
+def classification_metrics(per_label, true_backdoor_labels):
+    """
+    Standard binary-classification metrics, treating each scanned label as one
+    sample: positive = "this label is backdoored".
+      true_backdoor_labels : iterable of int, the labels actually poisoned
+                              (ground truth, provided by the user)
+      per_label[i]['flagged']: the detector's prediction for that label
+    """
+    true_set = set(int(t) for t in true_backdoor_labels)
+    tp = fp = tn = fn = 0
+    for p in per_label:
+        actual_positive = p['label'] in true_set
+        predicted_positive = p['flagged']
+        if predicted_positive and actual_positive:
+            tp += 1
+        elif predicted_positive and not actual_positive:
+            fp += 1
+        elif not predicted_positive and actual_positive:
+            fn += 1
+        else:
+            tn += 1
+
+    total = tp + fp + tn + fn
+    accuracy = (tp + tn) / total if total else 0.0
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = (2 * precision * recall / (precision + recall)
+          if (precision + recall) else 0.0)
+    fpr = fp / (fp + tn) if (fp + tn) else 0.0
+    fnr = fn / (fn + tp) if (fn + tp) else 0.0
+
+    return {
+        'tp': tp, 'fp': fp, 'tn': tn, 'fn': fn,
+        'accuracy': accuracy, 'precision': precision, 'recall': recall,
+        'f1_score': f1, 'fpr': fpr, 'fnr': fnr,
+    }
+
+
 def run_detection(model_path, dataset_path, run_id, steps=200, batch_size=32,
                    lr=0.1, init_cost=1e-3, patience=5, cost_multiplier=2,
-                   attack_succ_threshold=0.99, log=_noop_log, progress=_noop_progress):
+                   attack_succ_threshold=0.99, labels_to_scan=None,
+                   true_backdoor_labels=None,
+                   log=_noop_log, progress=_noop_progress):
+    """
+    labels_to_scan: optional list/iterable of class indices to scan instead of
+    every class. Useful to cut runtime drastically while testing (e.g. scan
+    just 5 classes instead of all 43). MAD outlier detection still needs a
+    reasonable spread of "normal" classes to compare against, so don't drop
+    below ~5-10 labels if you want the flagging to mean anything.
+
+    true_backdoor_labels: optional list/iterable of class indices that are
+    ACTUALLY poisoned (ground truth, known because you injected them, or
+    because you're testing on a known model). If given, Accuracy/Precision/
+    Recall/F1/FPR/FNR are computed against the detector's flags. If omitted,
+    only the raw outlier-detection results are returned (no metrics).
+    """
+    import time as _time
     from keras.models import load_model
     from keras.preprocessing.image import ImageDataGenerator
     from visualizer import Visualizer
+
+    _start_time = _time.time()
+
+    auto_meta_used = False
+    if not true_backdoor_labels:
+        meta = load_model_meta(model_path)
+        if meta and meta.get('true_backdoor_labels'):
+            true_backdoor_labels = meta['true_backdoor_labels']
+            auto_meta_used = True
+            log('Auto-loaded ground-truth backdoored label(s) from training metadata: %s' %
+                true_backdoor_labels)
 
     graph, sess = new_session()
     result_dir = os.path.join(RESULTS_DIR, run_id)
@@ -389,12 +498,17 @@ def run_detection(model_path, dataset_path, run_id, steps=200, batch_size=32,
 
             mask_shape = np.ceil(np.array(input_shape[0:2], dtype=float)).astype(int)
 
+            target_list = (sorted(set(int(t) for t in labels_to_scan))
+                            if labels_to_scan else list(range(num_classes)))
+            log('Scanning %d of %d classes: %s' %
+                (len(target_list), num_classes, target_list))
+
             l1_norms = []
             per_label = []
 
-            for i, y_target in enumerate(range(num_classes)):
-                log('Reverse-engineering trigger for label %d/%d ...' %
-                    (y_target, num_classes - 1))
+            for i, y_target in enumerate(target_list):
+                log('Reverse-engineering trigger for label %d (%d/%d) ...' %
+                    (y_target, i + 1, len(target_list)))
                 pattern_init = np.random.random(input_shape) * 255.0
                 mask_init = np.random.random(mask_shape)
 
@@ -424,9 +538,9 @@ def run_detection(model_path, dataset_path, run_id, steps=200, batch_size=32,
                     'fusion_img': '%s/%s' % (run_id, fusion_file),
                 })
 
-                progress(i + 1, num_classes, 'detecting')
+                progress(i + 1, len(target_list), 'detecting')
 
-            log('Running MAD outlier detection over %d labels...' % num_classes)
+            log('Running MAD outlier detection over %d scanned labels...' % len(target_list))
             labels = [p['label'] for p in per_label]
             outlier_result = outlier_detection(l1_norms, labels)
             flagged_labels = set(f['label'] for f in outlier_result['flagged'])
@@ -437,9 +551,25 @@ def run_detection(model_path, dataset_path, run_id, steps=200, batch_size=32,
                 (len(outlier_result['flagged']),
                  [f['label'] for f in outlier_result['flagged']]))
 
+    detection_time = _time.time() - _start_time
+    log('Detection time: %.2f sec' % detection_time)
+
+    metrics = None
+    if true_backdoor_labels:
+        metrics = classification_metrics(per_label, true_backdoor_labels)
+        metrics['detection_time_sec'] = float(detection_time)
+        log('Accuracy=%.4f Precision=%.4f Recall=%.4f F1=%.4f FPR=%.4f FNR=%.4f' %
+            (metrics['accuracy'], metrics['precision'], metrics['recall'],
+             metrics['f1_score'], metrics['fpr'], metrics['fnr']))
+
     return {
         'run_id': run_id,
         'num_classes': int(num_classes),
+        'num_scanned': len(target_list),
         'per_label': per_label,
         'outlier': outlier_result,
+        'detection_time_sec': float(detection_time),
+        'metrics': metrics,
+        'true_backdoor_labels': list(true_backdoor_labels) if true_backdoor_labels else None,
+        'ground_truth_source': 'training_metadata' if auto_meta_used else ('user_provided' if metrics else None),
     }

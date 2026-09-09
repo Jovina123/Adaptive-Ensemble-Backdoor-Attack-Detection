@@ -159,6 +159,15 @@
         </div>
       </div>
       <div class="hint">Runs Neural-Cleanse-style trigger reverse-engineering for every class, then flags outliers with MAD. This can take a while (steps &times; num_classes).</div>
+
+      <label>Labels to scan (comma-separated, blank = all classes)</label>
+      <input type="text" id="labelsToScan" placeholder="e.g. 0,1,2,33  (leave blank to scan every class)">
+      <div class="hint">Scanning a handful of labels instead of every class runs much faster &mdash; useful for testing. Include at least ~5-10 labels for the outlier flagging to be meaningful.</div>
+
+      <label>Ground-truth backdoored labels (optional override)</label>
+      <input type="text" id="trueBackdoorLabels" placeholder="leave blank to auto-use the labels poisoned during training">
+      <div class="hint">If the selected model was poisoned via the Train panel, its true backdoored label(s) are picked up automatically from training metadata and Accuracy/Precision/Recall/F1/FPR/FNR are computed without typing anything here. Only fill this in to override, or when testing a model trained outside this app.</div>
+
       <button id="detectBtn" class="success">Run Detector</button>
     </div>
 
@@ -329,10 +338,20 @@ $('detectBtn').addEventListener('click', async () => {
   const dataset = $('detectDatasetSelect').value;
   const model = $('modelSelect').value;
   if (!dataset || !model) { alert('Pick both a dataset and a model'); return; }
+  const labelsRaw = $('labelsToScan').value.trim();
+  const labels_to_scan = labelsRaw
+    ? labelsRaw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
+    : undefined;
+  const trueLabelsRaw = $('trueBackdoorLabels').value.trim();
+  const true_backdoor_labels = trueLabelsRaw
+    ? trueLabelsRaw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
+    : undefined;
   const payload = {
     dataset, model,
     steps: parseInt($('steps').value, 10),
     batch_size: parseInt($('batchSize').value, 10),
+    labels_to_scan,
+    true_backdoor_labels,
   };
   try {
     $('resultsBody').innerHTML = '<div class="empty">Running...</div>';
@@ -387,7 +406,9 @@ async function poll() {
 // ---------- results rendering ----------
 
 function renderResults(result) {
-  const { outlier, per_label } = result;
+  const { outlier, per_label, metrics } = result;
+  const detectionTime = (metrics && metrics.detection_time_sec !== undefined)
+    ? metrics.detection_time_sec : result.detection_time_sec;
   const flaggedSet = new Set(outlier.flagged.map(f => f.label));
   const maxNorm = Math.max(...per_label.map(p => p.l1_norm));
 
@@ -396,7 +417,28 @@ function renderResults(result) {
   html += stat(per_label.length, 'classes scanned');
   html += stat(outlier.flagged.length, 'flagged as backdoored');
   html += stat(outlier.median.toFixed(1), 'median L1 norm');
+  if (detectionTime !== undefined) {
+    html += stat(detectionTime.toFixed(2) + 's', 'detection time');
+  }
   html += '</div>';
+
+  if (metrics) {
+    const sourceNote = result.ground_truth_source === 'training_metadata'
+      ? ' <span class="hint" style="font-weight:normal;">(ground truth: ' + result.true_backdoor_labels.join(', ') + ' &mdash; auto-detected from training)</span>'
+      : ' <span class="hint" style="font-weight:normal;">(ground truth: ' + result.true_backdoor_labels.join(', ') + ' &mdash; manually entered)</span>';
+    html += '<h3 style="margin-top:18px;">Evaluation Metrics' + sourceNote + '</h3>';
+    html += '<div class="stat-grid">';
+    html += stat((metrics.accuracy * 100).toFixed(1) + '%', 'Accuracy');
+    html += stat((metrics.precision * 100).toFixed(1) + '%', 'Precision');
+    html += stat((metrics.recall * 100).toFixed(1) + '%', 'Recall');
+    html += stat((metrics.f1_score * 100).toFixed(1) + '%', 'F1-Score');
+    html += stat((metrics.fpr * 100).toFixed(1) + '%', 'FPR');
+    html += stat((metrics.fnr * 100).toFixed(1) + '%', 'FNR');
+    html += stat(metrics.detection_time_sec.toFixed(2) + 's', 'Detection Time');
+    html += '</div>';
+  } else {
+    html += '<p class="hint" style="margin-top:10px;">Enter ground-truth backdoored labels before running to see Accuracy/Precision/Recall/F1/FPR/FNR.</p>';
+  }
 
   if (outlier.flagged.length) {
     html += '<p style="color:var(--danger);font-size:13px;margin-top:14px;">Likely backdoored label(s): '
