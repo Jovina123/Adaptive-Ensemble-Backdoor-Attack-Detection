@@ -1,0 +1,20 @@
+# Data & model artifacts (too large / regenerable — don't commit)
+data/
+checkpoints/
+results/
+temps/
+feature_data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
