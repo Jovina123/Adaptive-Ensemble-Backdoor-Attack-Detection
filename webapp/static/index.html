@@ -144,8 +144,12 @@
 
     <div class="panel">
       <h2><span class="n">4</span> Run Detector</h2>
-      <label>Model to inspect</label>
+      <label>Upload a trained .h5 model</label>
+      <input type="file" id="modelFileInput" accept=".h5">
+      <button id="uploadModelBtn" class="secondary">Upload Model</button>
+      <label style="margin-top:16px;">Model to inspect</label>
       <select id="modelSelect"></select>
+
       <label>Dataset for reverse-engineering (test split used)</label>
       <select id="detectDatasetSelect"></select>
       <div class="row">
@@ -281,6 +285,28 @@ $('uploadBtn').addEventListener('click', async () => {
     $('uploadBtn').textContent = 'Upload';
   }
 });
+
+// ---------- upload model ----------
+
+$('uploadModelBtn').addEventListener('click', async () => {
+  const f = $('modelFileInput').files[0];
+  if (!f) { alert('Choose a .h5 model file first'); return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  $('uploadModelBtn').disabled = true;
+  $('uploadModelBtn').textContent = 'Uploading...';
+  try {
+    await api('/api/upload_model', { method: 'POST', body: fd });
+    await refreshModels();
+    $('modelSelect').value = f.name;
+  } catch (e) {
+    alert('Model upload failed: ' + e.message);
+  } finally {
+    $('uploadModelBtn').disabled = false;
+    $('uploadModelBtn').textContent = 'Upload Model';
+  }
+});
+
 
 // ---------- static poisoned file ----------
 

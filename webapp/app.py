@@ -141,6 +141,34 @@ def api_models():
     return jsonify(_list_h5(pipeline.MODEL_DIR))
 
 
+@app.route('/api/upload_model', methods=['POST'])
+def api_upload_model():
+    if 'file' not in request.files:
+        return jsonify({'error': 'no file field named "file"'}), 400
+    f = request.files['file']
+    if not f.filename.endswith('.h5'):
+        return jsonify({'error': 'expected a .h5 Keras model file'}), 400
+
+    safe_name = os.path.basename(f.filename)
+    dest = os.path.join(pipeline.MODEL_DIR, safe_name)
+    f.save(dest)
+
+    try:
+        import keras
+        model = keras.models.load_model(dest)
+        info = {
+            'input_shape': [d for d in model.input_shape],
+            'output_shape': [d for d in model.output_shape],
+        }
+    except Exception as exc:  # noqa: BLE001
+        os.remove(dest)
+        return jsonify({'error': 'uploaded file is not a readable Keras model: %s' % exc}), 400
+
+    info['name'] = safe_name
+    return jsonify(info)
+
+
+
 # ---------------------------------------------------------------------- #
 # Upload
 # ---------------------------------------------------------------------- #
