@@ -15,7 +15,10 @@ np.random.seed(123)
 set_random_seed(123)
 
 from keras.models import load_model
-from keras.preprocessing.image import ImageDataGenerator
+# ImageDataGenerator removed in Keras 3 (was imported from
+# keras.preprocessing.image). No augmentation was actually used here
+# (ImageDataGenerator() had no args), so it's replaced with a plain
+# batch generator below instead of reinstalling a legacy keras package.
 
 from visualizer import Visualizer
 
@@ -104,9 +107,15 @@ def load_dataset(data_file=('%s/%s' % (DATA_DIR, DATA_FILE))):
 
 def build_data_loader(X, Y):
 
-    datagen = ImageDataGenerator()
-    generator = datagen.flow(
-        X, Y, batch_size=BATCH_SIZE)
+    def simple_batch_generator(X, Y, batch_size):
+        n = len(X)
+        while True:
+            idx = np.random.permutation(n)
+            for start in range(0, n, batch_size):
+                batch_idx = idx[start:start + batch_size]
+                yield X[batch_idx], Y[batch_idx]
+
+    generator = simple_batch_generator(X, Y, BATCH_SIZE)
 
     return generator
 

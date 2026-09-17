@@ -108,7 +108,7 @@ def load_model_meta(model_path):
 
 
 def new_session():
-    import tensorflow as tf
+    import tensorflow.compat.v1 as tf
     import keras.backend as K
 
     config = tf.ConfigProto(
@@ -449,7 +449,8 @@ def run_detection(model_path, dataset_path, run_id, steps=200, batch_size=32,
     """
     import time as _time
     from keras.models import load_model
-    from keras.preprocessing.image import ImageDataGenerator
+    # ImageDataGenerator removed in Keras 3; replaced with a plain
+    # batch generator below (no augmentation was actually used here).
     from visualizer import Visualizer
 
     _start_time = _time.time()
@@ -481,8 +482,15 @@ def run_detection(model_path, dataset_path, run_id, steps=200, batch_size=32,
             log('Loading model %s' % model_path)
             model = load_model(model_path)
 
-            datagen = ImageDataGenerator()
-            gen = datagen.flow(X_test, Y_test, batch_size=batch_size)
+            def _simple_batch_generator(X, Y, batch_size):
+                n = len(X)
+                while True:
+                    idx = np.random.permutation(n)
+                    for start in range(0, n, batch_size):
+                        batch_idx = idx[start:start + batch_size]
+                        yield X[batch_idx], Y[batch_idx]
+
+            gen = _simple_batch_generator(X_test, Y_test, batch_size)
 
             mini_batch = max(1, (1000 // batch_size))
 
