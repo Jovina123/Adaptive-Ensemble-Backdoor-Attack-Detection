@@ -38,6 +38,18 @@ os.environ.setdefault('OMP_NUM_THREADS', CPU_THREADS)
 os.environ.setdefault('OPENBLAS_NUM_THREADS', CPU_THREADS)
 os.environ.setdefault('MKL_NUM_THREADS', CPU_THREADS)
 os.environ.setdefault('NUMEXPR_NUM_THREADS', CPU_THREADS)
+
+# --------------------------------------------------------------------------- #
+# This codebase was written for TF1/Keras2-style session & graph APIs
+# (tf.Session, tf.Graph, keras.backend.set_session, ImageDataGenerator, ...).
+# Modern TensorFlow bundles Keras 3 by default, which removed all of these.
+# Installing the `tf_keras` package and setting this flag makes `import keras`
+# (and tensorflow's own internal keras usage) resolve to the legacy
+# Keras-2-compatible implementation instead, which keeps this old code
+# working with minimal changes. This MUST be set before tensorflow/keras are
+# imported anywhere in the process.
+# --------------------------------------------------------------------------- #
+os.environ.setdefault('TF_USE_LEGACY_KERAS', '1')
 CPU_THREADS = int(CPU_THREADS)
 
 import numpy as np

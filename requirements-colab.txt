@@ -5,3 +5,4 @@ pillow
 pyyaml
 h5py
 tensorflow
+tf_keras
