@@ -255,6 +255,7 @@ def api_train():
     margin = int(body.get('margin', 1))
     inject_ratio = float(body.get('inject_ratio', 0.2))
     epochs = int(body.get('epochs', 10))
+    train_split_ratio = float(body.get('train_split_ratio', 0.8))
 
     if not dataset:
         return jsonify({'error': 'dataset is required'}), 400
@@ -267,7 +268,9 @@ def api_train():
         'target_labels': [int(t) for t in target_labels],
         'pattern_size': pattern_size, 'margin': margin,
         'inject_ratio': inject_ratio, 'epochs': epochs,
+        'train_split_ratio': train_split_ratio,
     })
+
     if not ok:
         return jsonify({'error': err}), 409
     return jsonify({'started': True, 'model_name': model_name})

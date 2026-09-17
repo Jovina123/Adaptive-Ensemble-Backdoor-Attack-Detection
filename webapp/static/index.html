@@ -138,7 +138,11 @@
       <input type="text" id="modelName" value="my_model.h5">
       <label>Epochs</label>
       <input type="number" id="epochs" value="10" min="1">
+      <label>Train / test split ratio (used only if the dataset has no train/test split yet)</label>
+      <input type="number" id="splitRatio" value="0.8" step="0.05" min="0.05" max="0.95">
+      <div class="hint" id="splitHint">If the selected dataset already has X_train/Y_train/X_test/Y_test, this ratio is ignored. If it only has one pool of data (X_test/Y_test or X/Y), it will be shuffled and split using this ratio (e.g. 0.8 = 80% train, 20% test) right before training.</div>
       <button id="trainBtn">Train Model</button>
+
       <div class="hint">Or skip training and use an existing model file below.</div>
     </div>
 
@@ -234,7 +238,19 @@ function updateDatasetInfo(list) {
   $('datasetInfo').textContent = ds
     ? 'keys: ' + ds.keys.join(', ') + ' | shapes: ' + JSON.stringify(ds.shapes)
     : '';
+
+  if (ds && ds.has_train_split) {
+    $('splitHint').textContent = 'This dataset already has X_train/Y_train/X_test/Y_test \u2014 the split ratio below is ignored.';
+    $('splitRatio').disabled = true;
+  } else if (ds && ds.needs_auto_split) {
+    $('splitHint').textContent = 'This dataset only has a single pool of data (no separate train/test). It will be shuffled and split using the ratio below right before training.';
+    $('splitRatio').disabled = false;
+  } else {
+    $('splitHint').textContent = 'If the selected dataset already has X_train/Y_train/X_test/Y_test, this ratio is ignored. If it only has one pool of data (X_test/Y_test or X/Y), it will be shuffled and split using this ratio (e.g. 0.8 = 80% train, 20% test) right before training.';
+    $('splitRatio').disabled = false;
+  }
 }
+
 
 async function refreshModels() {
   const list = await api('/api/models');
@@ -348,7 +364,9 @@ $('trainBtn').addEventListener('click', async () => {
     pattern_size: parseInt($('patternSize').value, 10),
     margin: parseInt($('margin').value, 10),
     inject_ratio: parseFloat($('injectRatio').value),
+    train_split_ratio: parseFloat($('splitRatio').value),
   };
+
   try {
     await api('/api/train', {
       method: 'POST', headers: {'Content-Type':'application/json'},

@@ -134,10 +134,14 @@ def dataset_info(path):
         for name in hf:
             info['keys'].append(name)
             info['shapes'][name] = list(hf[name].shape)
-    for y_key in ('Y_train', 'Y_test'):
+    for y_key in ('Y_train', 'Y_test', 'Y'):
         if y_key in info['shapes'] and len(info['shapes'][y_key]) == 2:
             info['num_classes'] = info['shapes'][y_key][1]
             break
+    keys_set = set(info['keys'])
+    info['has_train_split'] = {'X_train', 'Y_train', 'X_test', 'Y_test'}.issubset(keys_set)
+    info['needs_auto_split'] = (not info['has_train_split']) and (
+        {'X_test', 'Y_test'}.issubset(keys_set) or {'X', 'Y'}.issubset(keys_set))
     return info
 
 
@@ -264,13 +268,68 @@ def poison_dataset_to_file(src_path, dst_path, target_ls, pattern_size,
     return dst_path
 
 
+def _load_train_test(dataset_path, split_ratio=0.8, log=_noop_log):
+    """
+    Load a dataset for training, tolerant of different layouts:
+      - Proper X_train/Y_train/X_test/Y_test  -> used as-is (split_ratio ignored).
+      - Only a single pool (X_test/Y_test, or generic X/Y) -> shuffled and split
+        into train/test using split_ratio (fraction going to train).
+    Returns (X_train, Y_train, X_test, Y_test, used_split_ratio_or_None).
+    """
+    with h5py.File(dataset_path, 'r') as hf:
+        keys = set(hf.keys())
+
+    if {'X_train', 'Y_train', 'X_test', 'Y_test'}.issubset(keys):
+        dataset = _load_keys(dataset_path, ['X_train', 'Y_train', 'X_test', 'Y_test'])
+        X_train = np.array(dataset['X_train'], dtype='float32')
+        Y_train = np.array(dataset['Y_train'], dtype='float32')
+        X_test = np.array(dataset['X_test'], dtype='float32')
+        Y_test = np.array(dataset['Y_test'], dtype='float32')
+        log('Dataset already has train/test split (%d train, %d test).' %
+            (len(Y_train), len(Y_test)))
+        return X_train, Y_train, X_test, Y_test, None
+
+    if {'X_test', 'Y_test'}.issubset(keys):
+        x_key, y_key = 'X_test', 'Y_test'
+    elif {'X', 'Y'}.issubset(keys):
+        x_key, y_key = 'X', 'Y'
+    else:
+        raise ValueError(
+            'Dataset has keys %s - expected either X_train/Y_train/X_test/Y_test, '
+            'or a single pool as X_test/Y_test or X/Y to auto-split.' % sorted(keys))
+
+    dataset = _load_keys(dataset_path, [x_key, y_key])
+    X = np.array(dataset[x_key], dtype='float32')
+    Y = np.array(dataset[y_key], dtype='float32')
+
+    split_ratio = float(split_ratio)
+    split_ratio = min(max(split_ratio, 0.05), 0.95)
+
+    n = len(Y)
+    idx = np.random.permutation(n)
+    n_train = int(round(n * split_ratio))
+    train_idx, test_idx = idx[:n_train], idx[n_train:]
+
+    X_train, Y_train = X[train_idx], Y[train_idx]
+    X_test, Y_test = X[test_idx], Y[test_idx]
+    log('Dataset has only "%s"/"%s" (%d samples). Auto-splitting %.0f%% train / %.0f%% test '
+        '-> %d train, %d test.' % (x_key, y_key, n, split_ratio * 100, (1 - split_ratio) * 100,
+                                    len(Y_train), len(Y_test)))
+    return X_train, Y_train, X_test, Y_test, split_ratio
+
+
 def train_model(dataset_path, model_name, mode='clean', target_labels=None,
                  pattern_size=4, margin=1, inject_ratio=0.2, epochs=10,
-                 base=32, dense=512, log=_noop_log, progress=_noop_progress):
+                 base=32, dense=512, train_split_ratio=0.8,
+                 log=_noop_log, progress=_noop_progress):
     """
     mode:
       'clean'  - train on the dataset as-is, no poisoning
       'poison' - poison on the fly during training (backdoor injection)
+    train_split_ratio:
+      Used only when the dataset does not already have a train/test split
+      (i.e. it only has X_test/Y_test or X/Y) - fraction of samples put into
+      the training set, the rest becomes the test set.
     Returns dict with model_path + final metrics.
     """
     import keras
@@ -279,16 +338,14 @@ def train_model(dataset_path, model_name, mode='clean', target_labels=None,
     with graph.as_default():
         with sess.as_default():
             log('Loading dataset %s' % dataset_path)
-            dataset = _load_keys(dataset_path, ['X_train', 'Y_train', 'X_test', 'Y_test'])
-            X_train = np.array(dataset['X_train'], dtype='float32')
-            Y_train = np.array(dataset['Y_train'], dtype='float32')
-            X_test = np.array(dataset['X_test'], dtype='float32')
-            Y_test = np.array(dataset['Y_test'], dtype='float32')
+            X_train, Y_train, X_test, Y_test, used_split_ratio = _load_train_test(
+                dataset_path, split_ratio=train_split_ratio, log=log)
 
             input_shape = X_train.shape[1:]
             num_classes = Y_train.shape[1]
             log('X_train %s, Y_train %s, %d classes' %
                 (str(X_train.shape), str(Y_train.shape), num_classes))
+
 
             model = build_model(input_shape, num_classes, base=base, dense=dense)
 
@@ -356,6 +413,7 @@ def train_model(dataset_path, model_name, mode='clean', target_labels=None,
                 'margin': margin if mode == 'poison' else None,
                 'inject_ratio': inject_ratio if mode == 'poison' else None,
                 'dataset_path': dataset_path,
+                'train_split_ratio': used_split_ratio,
                 'metrics': metrics,
             }
             with open(_meta_path(model_path), 'w') as f:
