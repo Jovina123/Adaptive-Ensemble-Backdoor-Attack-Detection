@@ -1,0 +1,7 @@
+flask
+numpy
+scipy
+pillow
+pyyaml
+h5py
+tensorflow
