@@ -170,6 +170,11 @@ class Visualizer:
                       (0, uncrop_shape[1] - self.input_shape[1])))
 
         self.cost = self.init_cost
+        # Tensor mirror of self.cost so _train_step (compiled with
+        # @tf.function below) picks up cost changes via .assign() without
+        # forcing a retrace on every value change.
+        self.cost_tensor = tf.Variable(float(self.init_cost), dtype=tf.float32,
+                                       trainable=False, name='cost')
         self.opt = keras.optimizers.Adam(learning_rate=self.lr, beta_1=0.5, beta_2=0.9)
 
         pass
@@ -247,9 +252,14 @@ class Visualizer:
 
         return output_tensor, mask_tensor, mask_upsample_tensor, pattern_raw_tensor
 
+    @tf.function(reduce_retracing=True)
     def _train_step(self, X_batch, Y_target):
-        """One eager optimisation step. Returns numpy scalars/arrays matching
-        the original K.function(...) output: (loss_ce, loss_reg, loss, loss_acc)."""
+        """One eager-compiled optimisation step (wrapped in @tf.function so
+        TF traces it once into a graph instead of re-running the whole
+        Python forward pass through eager ops every single call - this is
+        the main speed win over plain eager execution). Returns
+        (loss_ce, loss_reg, loss, loss_acc) tensors matching the original
+        K.function(...) output shapes."""
         y_true_tensor = tf.convert_to_tensor(Y_target, dtype=tf.float32)
 
         with tf.GradientTape() as tape:
@@ -265,13 +275,16 @@ class Visualizer:
             elif self.regularization == 'l2':
                 loss_reg = tf.sqrt(tf.reduce_sum(tf.square(mask_upsample_tensor)) / self.img_color)
 
-            loss = loss_ce + loss_reg * self.cost
+            loss = loss_ce + loss_reg * self.cost_tensor
 
         grads = tape.gradient(loss, [self.pattern_tanh_tensor, self.mask_tanh_tensor])
         self.opt.apply_gradients(zip(grads, [self.pattern_tanh_tensor, self.mask_tanh_tensor]))
 
-        return (loss_ce.numpy(), loss_reg.numpy() * np.ones_like(loss_ce.numpy()),
-                loss.numpy(), loss_acc.numpy())
+        return (loss_ce, loss_reg * tf.ones_like(loss_ce), loss, loss_acc)
+
+    def _set_cost(self, value):
+        self.cost = value
+        self.cost_tensor.assign(float(value))
 
     def reset_opt(self):
         # Recreate the optimizer from scratch rather than poking at its
@@ -286,9 +299,9 @@ class Visualizer:
 
         # setting cost
         if self.reset_cost_to_zero:
-            self.cost = 0
+            self._set_cost(0)
         else:
-            self.cost = self.init_cost
+            self._set_cost(self.init_cost)
 
         # setting mask and pattern
         mask = np.array(mask_init)
@@ -428,7 +441,7 @@ class Visualizer:
             if self.cost == 0 and avg_loss_acc >= self.attack_succ_threshold:
                 cost_set_counter += 1
                 if cost_set_counter >= self.patience:
-                    self.cost = self.init_cost
+                    self._set_cost(self.init_cost)
                     cost_up_counter = 0
                     cost_down_counter = 0
                     cost_up_flag = False
@@ -450,7 +463,7 @@ class Visualizer:
                     print('up cost from %.2E to %.2E' %
                           (Decimal(float(self.cost)),
                            Decimal(float(self.cost * self.cost_multiplier_up))))
-                self.cost *= self.cost_multiplier_up
+                self._set_cost(self.cost * self.cost_multiplier_up)
                 cost_up_flag = True
             elif cost_down_counter >= self.patience:
                 cost_down_counter = 0
@@ -458,7 +471,7 @@ class Visualizer:
                     print('down cost from %.2E to %.2E' %
                           (Decimal(float(self.cost)),
                            Decimal(float(self.cost / self.cost_multiplier_down))))
-                self.cost /= self.cost_multiplier_down
+                self._set_cost(self.cost / self.cost_multiplier_down)
                 cost_down_flag = True
 
             if self.save_tmp:
