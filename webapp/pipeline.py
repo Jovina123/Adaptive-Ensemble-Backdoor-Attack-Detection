@@ -223,7 +223,12 @@ def build_model(input_shape, num_classes, base=32, dense=512):
     model.add(Dropout(0.5))
     model.add(Dense(num_classes, activation='softmax'))
 
-    opt = keras.optimizers.Adam(lr=0.001, decay=1 * 10e-5)
+    # `decay=` and `lr=` are deprecated/removed in the new Keras 3 optimizer
+    # API (TF2 on Colab). Recreate the same "divide LR by (1 + decay*step)"
+    # behaviour with an explicit InverseTimeDecay schedule instead.
+    lr_schedule = keras.optimizers.schedules.InverseTimeDecay(
+        initial_learning_rate=0.001, decay_steps=1, decay_rate=1 * 10e-5)
+    opt = keras.optimizers.Adam(learning_rate=lr_schedule)
     model.compile(loss='categorical_crossentropy', optimizer=opt,
                   metrics=['accuracy'])
     return model
@@ -412,16 +417,16 @@ def train_model(dataset_path, model_name, mode='clean', target_labels=None,
                 class _Cb(keras.callbacks.Callback):
                     def on_epoch_end(self_, epoch, logs=None):
                         _, clean_acc = model.evaluate(X_test, Y_test, verbose=0)
-                        _, atk_acc = model.evaluate_generator(test_gen, steps=50, verbose=0)
+                        _, atk_acc = model.evaluate(test_gen, steps=50, verbose=0)
                         log('epoch %d/%d - clean_acc=%.4f - backdoor_success_rate=%.4f' %
                             (epoch + 1, epochs, clean_acc, atk_acc))
                         progress(epoch + 1, epochs, 'training')
 
-                model.fit_generator(gen, steps_per_epoch=steps_per_epoch, epochs=epochs,
-                                     verbose=0, callbacks=[_Cb()])
+                model.fit(gen, steps_per_epoch=steps_per_epoch, epochs=epochs,
+                          verbose=0, callbacks=[_Cb()])
 
                 loss, acc = model.evaluate(X_test, Y_test, verbose=0)
-                loss, backdoor_acc = model.evaluate_generator(test_gen, steps=100, verbose=0)
+                loss, backdoor_acc = model.evaluate(test_gen, steps=100, verbose=0)
                 log('Final Test Accuracy: %.4f | Final Backdoor Success Rate: %.4f' %
                     (acc, backdoor_acc))
                 metrics = {'test_accuracy': float(acc), 'backdoor_success_rate': float(backdoor_acc)}
@@ -430,9 +435,14 @@ def train_model(dataset_path, model_name, mode='clean', target_labels=None,
 
                 class _Cb(keras.callbacks.Callback):
                     def on_epoch_end(self_, epoch, logs=None):
+                        logs = logs or {}
+                        # Modern Keras logs 'accuracy'/'val_accuracy'; older
+                        # versions used 'acc'/'val_acc' - accept either.
+                        acc_v = logs.get('accuracy', logs.get('acc', 0))
+                        val_acc_v = logs.get('val_accuracy', logs.get('val_acc', 0))
                         log('epoch %d/%d - loss=%.4f - acc=%.4f - val_loss=%.4f - val_acc=%.4f' %
-                            (epoch + 1, epochs, logs.get('loss', 0), logs.get('acc', 0),
-                             logs.get('val_loss', 0), logs.get('val_acc', 0)))
+                            (epoch + 1, epochs, logs.get('loss', 0), acc_v,
+                             logs.get('val_loss', 0), val_acc_v))
                         progress(epoch + 1, epochs, 'training')
 
                 model.fit(X_train, Y_train, batch_size=batch_size, epochs=epochs,
