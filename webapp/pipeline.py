@@ -285,7 +285,7 @@ def poison_dataset_to_file(src_path, dst_path, target_ls, pattern_size,
     pattern_dict = construct_mask_box(target_ls=target_ls, image_shape=input_shape,
                                        pattern_size=pattern_size, margin=margin)
 
-    import keras
+    from tensorflow import keras
 
     def poison_split(X, Y, ratio):
         X = np.copy(X)
@@ -378,7 +378,11 @@ def train_model(dataset_path, model_name, mode='clean', target_labels=None,
       the training set, the rest becomes the test set.
     Returns dict with model_path + final metrics.
     """
-    import keras
+    # Use tensorflow.keras (not the standalone `keras` package) so the
+    # Callback subclass below shares the exact same base class as the model
+    # built in build_model() - mixing the two under Keras 3 leaves the
+    # subclass missing internal attributes (_implements_train_batch_hooks).
+    from tensorflow import keras
 
     graph, sess = new_session()
     with session_scope(graph, sess):
