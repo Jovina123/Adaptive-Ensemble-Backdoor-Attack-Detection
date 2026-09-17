@@ -560,7 +560,7 @@ def run_detection(model_path, dataset_path, run_id, steps=200, batch_size=32,
     only the raw outlier-detection results are returned (no metrics).
     """
     import time as _time
-    from keras.models import load_model
+    from tensorflow.keras.models import load_model
     # ImageDataGenerator removed in Keras 3; replaced with a plain
     # batch generator below (no augmentation was actually used here).
     from visualizer import Visualizer

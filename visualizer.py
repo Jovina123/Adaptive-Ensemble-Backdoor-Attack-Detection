@@ -3,15 +3,24 @@
 # @Date    : 2018-11-05 11:30:01
 # @Author  : Bolun Wang (bolunwang@cs.ucsb.edu)
 # @Link    : http://cs.ucsb.edu/~bolunwang
+#
+# NOTE: Rewritten for TF2 / Keras 3 eager execution (e.g. Google Colab).
+# The original implementation built a static TF1 computation graph
+# (K.placeholder, opt.get_updates, K.function(..., updates=...)) which no
+# longer exists in modern Keras. This version keeps the exact same
+# algorithm (mask/pattern reverse-engineering with a tanh reparameterisation
+# and an adaptive L1-regularisation cost, "Neural Cleanse" style) but runs
+# each optimisation step eagerly inside a tf.GradientTape, matching how
+# TF2/Keras 3 actually executes code.
 
 import numpy as np
-from keras import backend as K
-
-from keras.losses import categorical_crossentropy
-from keras.metrics import categorical_accuracy
-from keras.optimizers import Adam
-from keras.utils import to_categorical
-from keras.layers import UpSampling2D, Cropping2D
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import backend as K
+from tensorflow.keras.losses import categorical_crossentropy
+from tensorflow.keras.metrics import categorical_accuracy
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.layers import UpSampling2D, Cropping2D
 
 import utils_backdoor
 
@@ -136,134 +145,139 @@ class Visualizer:
         mask_tanh = np.zeros_like(mask)
         pattern_tanh = np.zeros_like(pattern)
 
-        # prepare mask related tensors
-        self.mask_tanh_tensor = K.variable(mask_tanh)
-        mask_tensor_unrepeat = (K.tanh(self.mask_tanh_tensor) /
-                                (2 - self.epsilon) +
-                                0.5)
-        mask_tensor_unexpand = K.repeat_elements(
-            mask_tensor_unrepeat,
-            rep=self.img_color,
-            axis=2)
-        self.mask_tensor = K.expand_dims(mask_tensor_unexpand, axis=0)
-        upsample_layer = UpSampling2D(
+        # prepare mask/pattern as eager tf.Variables (these are what we
+        # actually optimise via gradient descent - everything derived from
+        # them below is recomputed fresh on every forward pass).
+        self.mask_tanh_tensor = tf.Variable(mask_tanh, dtype=tf.float32,
+                                            trainable=True, name='mask_tanh')
+        self.pattern_tanh_tensor = tf.Variable(pattern_tanh, dtype=tf.float32,
+                                               trainable=True, name='pattern_tanh')
+
+        # static layers reused across every forward pass (their weights
+        # don't change - only the mask/pattern variables above do)
+        self.upsample_layer = UpSampling2D(
             size=(self.upsample_size, self.upsample_size))
-        mask_upsample_tensor_uncrop = upsample_layer(self.mask_tensor)
-        uncrop_shape = K.int_shape(mask_upsample_tensor_uncrop)[1:]
-        cropping_layer = Cropping2D(
+
+        # figure out the crop needed to get back to input_shape, same as
+        # the original code (uses a dummy forward pass through the mask
+        # tensor's static shape, which doesn't depend on variable values)
+        dummy_mask_tensor = tf.expand_dims(
+            tf.repeat(tf.zeros_like(self.mask_tanh_tensor), repeats=self.img_color, axis=2),
+            axis=0)
+        uncrop_shape = self.upsample_layer(dummy_mask_tensor).shape[1:]
+        self.cropping_layer = Cropping2D(
             cropping=((0, uncrop_shape[0] - self.input_shape[0]),
                       (0, uncrop_shape[1] - self.input_shape[1])))
-        self.mask_upsample_tensor = cropping_layer(
-            mask_upsample_tensor_uncrop)
-        reverse_mask_tensor = (K.ones_like(self.mask_upsample_tensor) -
-                               self.mask_upsample_tensor)
 
-        def keras_preprocess(x_input, intensity_range):
+        self.cost = self.init_cost
+        self.opt = keras.optimizers.Adam(learning_rate=self.lr, beta_1=0.5, beta_2=0.9)
 
-            if intensity_range is 'raw':
-                x_preprocess = x_input
+        pass
 
-            elif intensity_range is 'imagenet':
-                # 'RGB'->'BGR'
-                x_tmp = x_input[..., ::-1]
-                # Zero-center by mean pixel
-                mean = K.constant([[[103.939, 116.779, 123.68]]])
-                x_preprocess = x_tmp - mean
+    def _keras_preprocess(self, x_input, intensity_range):
+        if intensity_range == 'raw':
+            x_preprocess = x_input
+        elif intensity_range == 'imagenet':
+            # 'RGB'->'BGR'
+            x_tmp = x_input[..., ::-1]
+            mean = tf.constant([[[103.939, 116.779, 123.68]]], dtype=tf.float32)
+            x_preprocess = x_tmp - mean
+        elif intensity_range == 'inception':
+            x_preprocess = (x_input / 255.0 - 0.5) * 2.0
+        elif intensity_range == 'mnist':
+            x_preprocess = x_input / 255.0
+        else:
+            raise Exception('unknown intensity_range %s' % intensity_range)
+        return x_preprocess
 
-            elif intensity_range is 'inception':
-                x_preprocess = (x_input / 255.0 - 0.5) * 2.0
+    def _keras_reverse_preprocess(self, x_input, intensity_range):
+        if intensity_range == 'raw':
+            x_reverse = x_input
+        elif intensity_range == 'imagenet':
+            mean = tf.constant([[[103.939, 116.779, 123.68]]], dtype=tf.float32)
+            x_reverse = x_input + mean
+            x_reverse = x_reverse[..., ::-1]
+        elif intensity_range == 'inception':
+            x_reverse = (x_input / 2 + 0.5) * 255.0
+        elif intensity_range == 'mnist':
+            x_reverse = x_input * 255.0
+        else:
+            raise Exception('unknown intensity_range %s' % intensity_range)
+        return x_reverse
 
-            elif intensity_range is 'mnist':
-                x_preprocess = x_input / 255.0
+    def _mask_and_pattern(self):
+        """Recompute the current mask/mask_upsample/pattern tensors from the
+        (trainable) tanh variables. Called fresh every forward pass so the
+        GradientTape sees the current variable values."""
+        mask_tensor_unrepeat = (tf.tanh(self.mask_tanh_tensor) /
+                                (2 - self.epsilon) + 0.5)
+        mask_tensor_unexpand = tf.repeat(
+            mask_tensor_unrepeat, repeats=self.img_color, axis=2)
+        mask_tensor = tf.expand_dims(mask_tensor_unexpand, axis=0)
+        mask_upsample_tensor_uncrop = self.upsample_layer(mask_tensor)
+        mask_upsample_tensor = self.cropping_layer(mask_upsample_tensor_uncrop)
 
-            else:
-                raise Exception('unknown intensity_range %s' % intensity_range)
-
-            return x_preprocess
-
-        def keras_reverse_preprocess(x_input, intensity_range):
-
-            if intensity_range is 'raw':
-                x_reverse = x_input
-
-            elif intensity_range is 'imagenet':
-                # Zero-center by mean pixel
-                mean = K.constant([[[103.939, 116.779, 123.68]]])
-                x_reverse = x_input + mean
-                # 'BGR'->'RGB'
-                x_reverse = x_reverse[..., ::-1]
-
-            elif intensity_range is 'inception':
-                x_reverse = (x_input / 2 + 0.5) * 255.0
-
-            elif intensity_range is 'mnist':
-                x_reverse = x_input * 255.0
-
-            else:
-                raise Exception('unknown intensity_range %s' % intensity_range)
-
-            return x_reverse
-
-        # prepare pattern related tensors
-        self.pattern_tanh_tensor = K.variable(pattern_tanh)
-        self.pattern_raw_tensor = (
-            (K.tanh(self.pattern_tanh_tensor) / (2 - self.epsilon) + 0.5) *
+        pattern_raw_tensor = (
+            (tf.tanh(self.pattern_tanh_tensor) / (2 - self.epsilon) + 0.5) *
             255.0)
 
-        # prepare input image related tensors
-        # ignore clip operation here
-        # assume input image is already clipped into valid color range
-        input_tensor = K.placeholder(model.input_shape)
+        return mask_tensor, mask_upsample_tensor, pattern_raw_tensor
+
+    def _forward(self, X_batch):
+        """Given a raw input batch, build the adversarial batch and run it
+        through the model. Returns (output, mask_tensor, mask_upsample_tensor,
+        pattern_raw_tensor)."""
+        mask_tensor, mask_upsample_tensor, pattern_raw_tensor = self._mask_and_pattern()
+        reverse_mask_tensor = tf.ones_like(mask_upsample_tensor) - mask_upsample_tensor
+
+        input_tensor = tf.convert_to_tensor(X_batch, dtype=tf.float32)
         if self.raw_input_flag:
             input_raw_tensor = input_tensor
         else:
-            input_raw_tensor = keras_reverse_preprocess(
+            input_raw_tensor = self._keras_reverse_preprocess(
                 input_tensor, self.intensity_range)
 
         # IMPORTANT: MASK OPERATION IN RAW DOMAIN
         X_adv_raw_tensor = (
             reverse_mask_tensor * input_raw_tensor +
-            self.mask_upsample_tensor * self.pattern_raw_tensor)
+            mask_upsample_tensor * pattern_raw_tensor)
 
-        X_adv_tensor = keras_preprocess(X_adv_raw_tensor, self.intensity_range)
+        X_adv_tensor = self._keras_preprocess(X_adv_raw_tensor, self.intensity_range)
+        output_tensor = self.model(X_adv_tensor, training=False)
 
-        output_tensor = model(X_adv_tensor)
-        y_true_tensor = K.placeholder(model.output_shape)
+        return output_tensor, mask_tensor, mask_upsample_tensor, pattern_raw_tensor
 
-        self.loss_acc = categorical_accuracy(output_tensor, y_true_tensor)
+    def _train_step(self, X_batch, Y_target):
+        """One eager optimisation step. Returns numpy scalars/arrays matching
+        the original K.function(...) output: (loss_ce, loss_reg, loss, loss_acc)."""
+        y_true_tensor = tf.convert_to_tensor(Y_target, dtype=tf.float32)
 
-        self.loss_ce = categorical_crossentropy(output_tensor, y_true_tensor)
+        with tf.GradientTape() as tape:
+            output_tensor, _, mask_upsample_tensor, _ = self._forward(X_batch)
 
-        if self.regularization is None:
-            self.loss_reg = K.constant(0)
-        elif self.regularization is 'l1':
-            self.loss_reg = (K.sum(K.abs(self.mask_upsample_tensor)) /
-                             self.img_color)
-        elif self.regularization is 'l2':
-            self.loss_reg = K.sqrt(K.sum(K.square(self.mask_upsample_tensor)) /
-                                   self.img_color)
+            loss_acc = categorical_accuracy(y_true_tensor, output_tensor)
+            loss_ce = categorical_crossentropy(y_true_tensor, output_tensor)
 
-        cost = self.init_cost
-        self.cost_tensor = K.variable(cost)
-        self.loss = self.loss_ce + self.loss_reg * self.cost_tensor
+            if self.regularization is None:
+                loss_reg = tf.constant(0.0)
+            elif self.regularization == 'l1':
+                loss_reg = tf.reduce_sum(tf.abs(mask_upsample_tensor)) / self.img_color
+            elif self.regularization == 'l2':
+                loss_reg = tf.sqrt(tf.reduce_sum(tf.square(mask_upsample_tensor)) / self.img_color)
 
-        self.opt = Adam(lr=self.lr, beta_1=0.5, beta_2=0.9)
-        self.updates = self.opt.get_updates(
-            params=[self.pattern_tanh_tensor, self.mask_tanh_tensor],
-            loss=self.loss)
-        self.train = K.function(
-            [input_tensor, y_true_tensor],
-            [self.loss_ce, self.loss_reg, self.loss, self.loss_acc],
-            updates=self.updates)
+            loss = loss_ce + loss_reg * self.cost
 
-        pass
+        grads = tape.gradient(loss, [self.pattern_tanh_tensor, self.mask_tanh_tensor])
+        self.opt.apply_gradients(zip(grads, [self.pattern_tanh_tensor, self.mask_tanh_tensor]))
+
+        return (loss_ce.numpy(), loss_reg.numpy() * np.ones_like(loss_ce.numpy()),
+                loss.numpy(), loss_acc.numpy())
 
     def reset_opt(self):
-
-        K.set_value(self.opt.iterations, 0)
-        for w in self.opt.weights:
-            K.set_value(w, np.zeros(K.int_shape(w)))
-
+        # Recreate the optimizer from scratch rather than poking at its
+        # internal weights - simpler and equivalent under TF2's eager
+        # optimizers (they carry their own moment estimates internally).
+        self.opt = keras.optimizers.Adam(learning_rate=self.lr, beta_1=0.5, beta_2=0.9)
         pass
 
     def reset_state(self, pattern_init, mask_init):
@@ -275,7 +289,6 @@ class Visualizer:
             self.cost = 0
         else:
             self.cost = self.init_cost
-        K.set_value(self.cost_tensor, self.cost)
 
         # setting mask and pattern
         mask = np.array(mask_init)
@@ -290,8 +303,8 @@ class Visualizer:
         print('mask_tanh', np.min(mask_tanh), np.max(mask_tanh))
         print('pattern_tanh', np.min(pattern_tanh), np.max(pattern_tanh))
 
-        K.set_value(self.mask_tanh_tensor, mask_tanh)
-        K.set_value(self.pattern_tanh_tensor, pattern_tanh)
+        self.mask_tanh_tensor.assign(mask_tanh)
+        self.pattern_tanh_tensor.assign(pattern_tanh)
 
         # resetting optimizer states
         self.reset_opt()
@@ -300,7 +313,9 @@ class Visualizer:
 
     def save_tmp_func(self, step):
 
-        cur_mask = K.eval(self.mask_upsample_tensor)
+        _, mask_upsample_tensor, pattern_raw_tensor = self._mask_and_pattern()
+
+        cur_mask = mask_upsample_tensor.numpy()
         cur_mask = cur_mask[0, ..., 0]
         img_filename = (
             '%s/%s' % (self.tmp_dir, 'tmp_mask_step_%d.png' % step))
@@ -308,8 +323,7 @@ class Visualizer:
                                   img_filename,
                                   'png')
 
-        cur_fusion = K.eval(self.mask_upsample_tensor *
-                            self.pattern_raw_tensor)
+        cur_fusion = (mask_upsample_tensor * pattern_raw_tensor).numpy()
         cur_fusion = cur_fusion[0, ...]
         img_filename = (
             '%s/%s' % (self.tmp_dir, 'tmp_fusion_step_%d.png' % step))
@@ -354,18 +368,18 @@ class Visualizer:
             loss_list = []
             loss_acc_list = []
             for idx in range(self.mini_batch):
-                X_batch, _ = gen.next()
+                X_batch, _ = next(gen)
                 if X_batch.shape[0] != Y_target.shape[0]:
                     Y_target = to_categorical([y_target] * X_batch.shape[0],
                                               self.num_classes)
                 (loss_ce_value,
                     loss_reg_value,
                     loss_value,
-                    loss_acc_value) = self.train([X_batch, Y_target])
-                loss_ce_list.extend(list(loss_ce_value.flatten()))
-                loss_reg_list.extend(list(loss_reg_value.flatten()))
-                loss_list.extend(list(loss_value.flatten()))
-                loss_acc_list.extend(list(loss_acc_value.flatten()))
+                    loss_acc_value) = self._train_step(X_batch, Y_target)
+                loss_ce_list.extend(list(np.array(loss_ce_value).flatten()))
+                loss_reg_list.extend(list(np.array(loss_reg_value).flatten()))
+                loss_list.extend(list(np.array(loss_value).flatten()))
+                loss_acc_list.extend(list(np.array(loss_acc_value).flatten()))
 
             avg_loss_ce = np.mean(loss_ce_list)
             avg_loss_reg = np.mean(loss_reg_list)
@@ -374,18 +388,19 @@ class Visualizer:
 
             # check to save best mask or not
             if avg_loss_acc >= self.attack_succ_threshold and avg_loss_reg < reg_best:
-                mask_best = K.eval(self.mask_tensor)
+                mask_tensor, mask_upsample_tensor, pattern_raw_tensor = self._mask_and_pattern()
+                mask_best = mask_tensor.numpy()
                 mask_best = mask_best[0, ..., 0]
-                mask_upsample_best = K.eval(self.mask_upsample_tensor)
+                mask_upsample_best = mask_upsample_tensor.numpy()
                 mask_upsample_best = mask_upsample_best[0, ..., 0]
-                pattern_best = K.eval(self.pattern_raw_tensor)
+                pattern_best = pattern_raw_tensor.numpy()
                 reg_best = avg_loss_reg
 
             # verbose
             if self.verbose != 0:
                 if self.verbose == 2 or step % (self.steps // 10) == 0:
                     print('step: %3d, cost: %.2E, attack: %.3f, loss: %f, ce: %f, reg: %f, reg_best: %f' %
-                          (step, Decimal(self.cost), avg_loss_acc, avg_loss,
+                          (step, Decimal(float(self.cost)), avg_loss_acc, avg_loss,
                            avg_loss_ce, avg_loss_reg, reg_best))
 
             # save log
@@ -414,12 +429,11 @@ class Visualizer:
                 cost_set_counter += 1
                 if cost_set_counter >= self.patience:
                     self.cost = self.init_cost
-                    K.set_value(self.cost_tensor, self.cost)
                     cost_up_counter = 0
                     cost_down_counter = 0
                     cost_up_flag = False
                     cost_down_flag = False
-                    print('initialize cost to %.2E' % Decimal(self.cost))
+                    print('initialize cost to %.2E' % Decimal(float(self.cost)))
             else:
                 cost_set_counter = 0
 
@@ -434,19 +448,17 @@ class Visualizer:
                 cost_up_counter = 0
                 if self.verbose == 2:
                     print('up cost from %.2E to %.2E' %
-                          (Decimal(self.cost),
-                           Decimal(self.cost * self.cost_multiplier_up)))
+                          (Decimal(float(self.cost)),
+                           Decimal(float(self.cost * self.cost_multiplier_up))))
                 self.cost *= self.cost_multiplier_up
-                K.set_value(self.cost_tensor, self.cost)
                 cost_up_flag = True
             elif cost_down_counter >= self.patience:
                 cost_down_counter = 0
                 if self.verbose == 2:
                     print('down cost from %.2E to %.2E' %
-                          (Decimal(self.cost),
-                           Decimal(self.cost / self.cost_multiplier_down)))
+                          (Decimal(float(self.cost)),
+                           Decimal(float(self.cost / self.cost_multiplier_down))))
                 self.cost /= self.cost_multiplier_down
-                K.set_value(self.cost_tensor, self.cost)
                 cost_down_flag = True
 
             if self.save_tmp:
@@ -454,11 +466,12 @@ class Visualizer:
 
         # save the final version
         if mask_best is None or self.save_last:
-            mask_best = K.eval(self.mask_tensor)
+            mask_tensor, mask_upsample_tensor, pattern_raw_tensor = self._mask_and_pattern()
+            mask_best = mask_tensor.numpy()
             mask_best = mask_best[0, ..., 0]
-            mask_upsample_best = K.eval(self.mask_upsample_tensor)
+            mask_upsample_best = mask_upsample_tensor.numpy()
             mask_upsample_best = mask_upsample_best[0, ..., 0]
-            pattern_best = K.eval(self.pattern_raw_tensor)
+            pattern_best = pattern_raw_tensor.numpy()
 
         if self.return_logs:
             return pattern_best, mask_best, mask_upsample_best, logs
