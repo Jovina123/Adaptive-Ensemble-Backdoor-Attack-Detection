@@ -120,19 +120,47 @@ def load_model_meta(model_path):
 
 
 def new_session():
-    import tensorflow.compat.v1 as tf
-    import keras.backend as K
+    """Return (graph, sess) for TF1-style graph isolation, or (None, None)
+    on TF2/Keras 3 runtimes (e.g. Colab) where there is no session/graph API
+    to set up - eager execution handles this per-call, so we just no-op.
+    Use `session_scope(graph, sess)` below instead of calling
+    `graph.as_default()`/`sess.as_default()` directly, so both cases work.
+    """
+    import tensorflow as tf
 
-    config = tf.ConfigProto(
+    if not tf.__version__.startswith('1'):
+        # TF2 (and Keras 3, which ships with modern TF) has no
+        # tf.Session / K.set_session - nothing to do here.
+        return None, None
+
+    import tensorflow.compat.v1 as tf1
+    from tensorflow.keras import backend as K
+
+    config = tf1.ConfigProto(
         intra_op_parallelism_threads=CPU_THREADS,
         inter_op_parallelism_threads=CPU_THREADS,
         device_count={'CPU': 1},
     )
-    graph = tf.Graph()
+    graph = tf1.Graph()
     with graph.as_default():
-        sess = tf.Session(graph=graph, config=config)
+        sess = tf1.Session(graph=graph, config=config)
         K.set_session(sess)
     return graph, sess
+
+
+def session_scope(graph, sess):
+    """Context manager that mirrors `graph.as_default(): sess.as_default():`
+    when both are real TF1 objects, and is a no-op under TF2 (graph/sess
+    will be None from new_session())."""
+    import contextlib
+
+    if graph is None or sess is None:
+        return contextlib.nullcontext()
+
+    stack = contextlib.ExitStack()
+    stack.enter_context(graph.as_default())
+    stack.enter_context(sess.as_default())
+    return stack
 
 
 # --------------------------------------------------------------------------- #
@@ -168,9 +196,10 @@ def _load_keys(path, keys):
 # --------------------------------------------------------------------------- #
 
 def build_model(input_shape, num_classes, base=32, dense=512):
-    import keras
-    from keras.layers import Conv2D, MaxPooling2D, Dense, Flatten, Dropout
-    from keras.models import Sequential
+    from tensorflow import keras
+    from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dense, Flatten, Dropout
+    from tensorflow.keras.models import Sequential
+
 
     model = Sequential()
     model.add(Conv2D(base, (3, 3), padding='same',
@@ -214,7 +243,7 @@ class _PoisonGenerator(object):
         self.num_classes = num_classes
 
     def _infect(self, img, tgt):
-        import keras
+        from tensorflow import keras
         mask, pattern = random.choice(self.pattern_dict[tgt])
         adv_img = injection_func(mask, pattern, np.copy(img))
         return adv_img, keras.utils.to_categorical(tgt, num_classes=self.num_classes)
@@ -347,8 +376,7 @@ def train_model(dataset_path, model_name, mode='clean', target_labels=None,
     import keras
 
     graph, sess = new_session()
-    with graph.as_default():
-        with sess.as_default():
+    with session_scope(graph, sess):
             log('Loading dataset %s' % dataset_path)
             X_train, Y_train, X_test, Y_test, used_split_ratio = _load_train_test(
                 dataset_path, split_ratio=train_split_ratio, log=log)
@@ -539,8 +567,7 @@ def run_detection(model_path, dataset_path, run_id, steps=200, batch_size=32,
     if not os.path.exists(result_dir):
         os.makedirs(result_dir)
 
-    with graph.as_default():
-        with sess.as_default():
+    with session_scope(graph, sess):
             log('Loading dataset %s' % dataset_path)
             dataset = _load_keys(dataset_path, ['X_test', 'Y_test'])
             X_test = np.array(dataset['X_test'], dtype='float32')
