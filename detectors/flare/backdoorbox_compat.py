@@ -8,6 +8,7 @@ This loader avoids those unrelated imports and loads only the
 components required by our experiments.
 """
 
+import importlib
 import os
 import sys
 import types
@@ -15,12 +16,8 @@ import types
 
 def setup_backdoorbox(backdoorbox_root):
     """
-    Prepare a minimal BackdoorBox package context.
-
-    Parameters
-    ----------
-    backdoorbox_root : str
-        Path to the external BackdoorBox repository.
+    Prepare a minimal BackdoorBox package context without importing
+    BackdoorBox's top-level package.
     """
 
     backdoorbox_root = os.path.abspath(backdoorbox_root)
@@ -37,11 +34,9 @@ def setup_backdoorbox(backdoorbox_root):
             f"BackdoorBox core directory not found: {core_root}"
         )
 
-    # Add BackdoorBox to sys.path so its modules can be resolved.
     if backdoorbox_root not in sys.path:
         sys.path.insert(0, backdoorbox_root)
 
-    # Create minimal package shells.
     package_paths = {
         "core": core_root,
         "core.attacks": os.path.join(core_root, "attacks"),
@@ -61,9 +56,21 @@ def setup_backdoorbox(backdoorbox_root):
             package.__path__ = [package_path]
             sys.modules[package_name] = package
 
+    # BackdoorBox's attack base class imports Log directly from
+    # core.utils. Load that symbol explicitly without executing
+    # core.utils.__init__, which would import unrelated modules.
+    log_module = importlib.import_module("core.utils.log")
+    sys.modules["core.utils"].Log = log_module.Log
+
+    # FLARE imports the test utility directly from core.utils.
+    # Load the actual function and expose it on the package shell.
+    test_module = importlib.import_module("core.utils.test")
+    sys.modules["core.utils"].test = test_module.test
+
 
 def load_badnets(backdoorbox_root):
     """Load the BackdoorBox BadNets class."""
+
     setup_backdoorbox(backdoorbox_root)
 
     from core.attacks.BadNets import BadNets
@@ -72,7 +79,8 @@ def load_badnets(backdoorbox_root):
 
 
 def load_resnet(backdoorbox_root):
-    """Load the BackdoorBox ResNet class."""
+    """Load the BackdoorBox ResNet model."""
+
     setup_backdoorbox(backdoorbox_root)
 
     from core.models.resnet import ResNet
@@ -81,7 +89,8 @@ def load_resnet(backdoorbox_root):
 
 
 def load_flare(backdoorbox_root):
-    """Load the BackdoorBox FLARE class."""
+    """Load the BackdoorBox FLARE defense."""
+
     setup_backdoorbox(backdoorbox_root)
 
     from core.defenses.FLARE import FLARE
