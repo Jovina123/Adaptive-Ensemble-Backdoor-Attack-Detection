@@ -128,3 +128,52 @@ def format_time(seconds):
     if f == "":
         f = "0ms"
     return f
+
+
+def load_model_from_checkpoint(checkpoint_path, device="cpu", num_classes=None):
+    """
+    Universally load a classifier model from a checkpoint.
+    Supports:
+        - PreActResNet18 / CIFAR-10 / GTSRB checkpoints containing 'netC'.
+        - Torchvision ResNet-50 checkpoints containing 'state_dict'.
+        - Generic PyTorch checkpoints.
+    Returns:
+        (model, arch_name, num_classes, input_size, checkpoint_dict)
+    """
+    from pathlib import Path
+    import torchvision.models as models
+    from classifier_models import PreActResNet18
+
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    if not isinstance(ckpt, dict):
+        raise ValueError("Checkpoint must be a dictionary.")
+
+    if "netC" in ckpt:
+        opt = ckpt.get("opt", None)
+        n_classes = num_classes or (getattr(opt, "num_classes", 10) if opt else 10)
+        dataset_name = getattr(opt, "dataset", "cifar10") if opt else "cifar10"
+        input_size = 28 if dataset_name == "mnist" else 32
+
+        model = PreActResNet18(num_classes=n_classes)
+        model.load_state_dict(ckpt["netC"], strict=True)
+        arch = "PreActResNet18"
+
+    elif "state_dict" in ckpt:
+        n_classes = int(ckpt.get("num_classes", num_classes or 2))
+        arch = ckpt.get("architecture", "resnet50")
+        input_size = 224
+
+        model = models.resnet50(weights=None)
+        model.fc = nn.Linear(model.fc.in_features, n_classes)
+        model.load_state_dict(ckpt["state_dict"], strict=True)
+
+    else:
+        raise ValueError("Unrecognized checkpoint format (neither 'netC' nor 'state_dict' found).")
+
+    model = model.to(device).eval()
+    return model, arch, n_classes, input_size, ckpt

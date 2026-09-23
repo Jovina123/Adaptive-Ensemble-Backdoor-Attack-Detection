@@ -1,20 +1,51 @@
-# Data & model artifacts (too large / regenerable — don't commit)
-data/
-checkpoints/
-results/
-temps/
-feature_data/
-
 # Python
 __pycache__/
-*.pyc
-*.pyo
-.Python
-*.egg-info/
-.venv/
-venv/
+*.py[cod]
+*.so
 
-# Editor/OS
+# Virtual environments
+venv/
+.venv/
+env/
+
+# macOS
 .DS_Store
-.idea/
-.vscode/
+
+# Generated datasets
+cifar10/
+cifar10_beatrix/
+pet_dataset/
+
+# Generated evidence
+evidence/
+
+# Model checkpoints
+checkpoints/
+*.pth
+*.pth.tar
+*.pt
+
+# Temporary / backup files
+*_backup.py
+*.save
+*_current.txt
+
+# Experiment outputs
+results_*.json
+test_main_cifar10.json
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+
+# Local experiment notebook
+traffic-signs-image-classification-97-cnn.ipynb
+
+# Local/generated experiment directories
+results/
+temps/
+defenses/Beatrix/temps/
+
+# Downloaded datasets
+data/cifar-10-batches-py/
+data/*.tar.gz
+data/__pycache__/
