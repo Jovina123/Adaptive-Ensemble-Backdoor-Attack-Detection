@@ -102,8 +102,17 @@ def main():
             "Google Colab with a GPU runtime."
         )
 
-    # Import BackdoorBox only after its path has been configured.
-    import core
+    # Load only the BackdoorBox components required by this experiment.
+    from detectors.flare.backdoorbox_compat import (
+        setup_backdoorbox,
+        load_badnets,
+        load_resnet,
+    )
+
+    setup_backdoorbox(BACKDOORBOX_ROOT)
+
+    BadNets = load_badnets(BACKDOORBOX_ROOT)
+    ResNet = load_resnet(BACKDOORBOX_ROOT)
 
     # -----------------------------------------------------------------------
     # Reproducibility
@@ -162,10 +171,10 @@ def main():
 
     print("\nCreating BadNets poisoned dataset...")
 
-    badnets = core.BadNets(
+    badnets = BadNets(
         train_dataset=trainset,
         test_dataset=testset,
-        model=core.models.ResNet(18),
+        model=ResNet(18),
         loss=nn.CrossEntropyLoss(),
         y_target=TARGET_LABEL,
         poisoned_rate=POISONING_RATE,
