@@ -355,6 +355,10 @@ class BeatrixDetector(BaseDetector):
     # ------------------------------------------------------------------
     # High-level Detection with Model-level Anomaly Index (J*)
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # High-level Detection with Model-level Anomaly Index (J*)
+    # Optimized for large cached feature sets
+    # ------------------------------------------------------------------
 
     def detect(
         self,
@@ -362,116 +366,539 @@ class BeatrixDetector(BaseDetector):
         labels: Optional[Union[torch.Tensor, np.ndarray]] = None,
         predictions: Optional[Union[torch.Tensor, np.ndarray]] = None
     ) -> BeatrixResult:
+
         """
-        Executes complete Beatrix detection:
-            1. Per-sample Gramian deviation scoring and thresholding.
-            2. Model-level Anomaly Index (J*) calculation using Median Absolute Deviation.
-            3. Target class identification.
-            4. Standardized confidence score mapping in [0, 1].
+        Optimized Beatrix detection.
+
+        Improvements:
+        1. Processes feature data in chunks.
+        2. Prints progress during scoring.
+        3. Avoids creating extremely large KMMD matrices.
+        4. Uses deterministic subsampling for KMMD.
+        5. Keeps the original Beatrix J* / MAD decision logic.
         """
+
         if not self.profiles:
-            raise RuntimeError("Call calibrate() or fit() before detect().")
+            raise RuntimeError(
+                "Call calibrate() or fit() before detect()."
+            )
 
         if not torch.is_tensor(features):
-            features = torch.tensor(features, dtype=torch.float32)
+            features = torch.tensor(
+                features,
+                dtype=torch.float32
+            )
 
-        # Decide which class assignments to evaluate against (predictions preferred)
+        features = features.float()
+
+        # --------------------------------------------------------------
+        # CLASS ASSIGNMENTS
+        # --------------------------------------------------------------
+
         if predictions is not None:
-            class_ids = predictions.detach().cpu().numpy() if torch.is_tensor(predictions) else np.asarray(predictions)
+
+            class_ids = (
+                predictions.detach().cpu().numpy()
+                if torch.is_tensor(predictions)
+                else np.asarray(predictions)
+            )
+
         elif labels is not None:
-            class_ids = labels.detach().cpu().numpy() if torch.is_tensor(labels) else np.asarray(labels)
+
+            class_ids = (
+                labels.detach().cpu().numpy()
+                if torch.is_tensor(labels)
+                else np.asarray(labels)
+            )
+
         else:
-            raise ValueError("Either predictions or labels must be provided.")
+
+            raise ValueError(
+                "Either predictions or labels must be provided."
+            )
 
         n = len(class_ids)
-        scores = np.zeros(n, dtype=np.float64)
-        flags = np.zeros(n, dtype=bool)
-        used_thresholds = np.zeros(n, dtype=np.float64)
 
-        # 1. Per-sample scoring
-        for class_id in np.unique(class_ids):
-            indices = np.where(class_ids == class_id)[0]
-            if class_id not in self.profiles:
-                continue
+        scores = np.zeros(
+            n,
+            dtype=np.float64
+        )
 
-            profile = self.profiles[class_id]
-            class_scores = profile.deviation(features[indices])
-            thresh = self.thresholds.get(class_id, self.global_threshold)
+        flags = np.zeros(
+            n,
+            dtype=bool
+        )
 
-            scores[indices] = class_scores
-            used_thresholds[indices] = thresh
-            flags[indices] = (class_scores > thresh)
+        used_thresholds = np.zeros(
+            n,
+            dtype=np.float64
+        )
 
-        # 2. Model-Level Anomaly Index (J*) across classes
-        # For each class, compute discrepancy metric J_c (KMMD or top deviation)
+        # --------------------------------------------------------------
+        # OPTIMIZATION PARAMETERS
+        # --------------------------------------------------------------
+
+        chunk_size = 256
+
+        # Maximum number of samples used for expensive KMMD calculation
+        max_kmmd_samples = 200
+
+        print()
+        print(
+            "Starting chunked Beatrix detection...",
+            flush=True
+        )
+
+        print(
+            f"Total samples : {n}",
+            flush=True
+        )
+
+        print(
+            f"Feature shape : {tuple(features.shape)}",
+            flush=True
+        )
+
+        print(
+            f"Chunk size    : {chunk_size}",
+            flush=True
+        )
+
+        # --------------------------------------------------------------
+        # 1. PER-SAMPLE BEATRIX SCORING
+        # --------------------------------------------------------------
+
+        unique_classes = np.unique(class_ids)
+
+        total_chunks = (
+            (n + chunk_size - 1)
+            // chunk_size
+        )
+
+        chunk_number = 0
+
+        for start in range(
+            0,
+            n,
+            chunk_size
+        ):
+
+            end = min(
+                start + chunk_size,
+                n
+            )
+
+            chunk_number += 1
+
+            print(
+                f"\rScoring chunk "
+                f"{chunk_number}/{total_chunks} "
+                f"[samples {start}:{end}]",
+                end="",
+                flush=True
+            )
+
+            chunk_features = features[start:end]
+
+            chunk_classes = class_ids[start:end]
+
+            for class_id in unique_classes:
+
+                local_indices = np.where(
+                    chunk_classes == class_id
+                )[0]
+
+                if len(local_indices) == 0:
+                    continue
+
+                if class_id not in self.profiles:
+                    continue
+
+                profile = self.profiles[class_id]
+
+                class_features = (
+                    chunk_features[local_indices]
+                )
+
+                class_scores = profile.deviation(
+                    class_features
+                )
+
+                global_indices = (
+                    start + local_indices
+                )
+
+                thresh = self.thresholds.get(
+                    class_id,
+                    self.global_threshold
+                )
+
+                scores[global_indices] = class_scores
+
+                used_thresholds[
+                    global_indices
+                ] = thresh
+
+                flags[
+                    global_indices
+                ] = (
+                    class_scores > thresh
+                )
+
+        print()
+        print(
+            "Per-sample Gramian scoring complete.",
+            flush=True
+        )
+
+        # --------------------------------------------------------------
+        # 2. MODEL-LEVEL ANOMALY INDEX J*
+        # --------------------------------------------------------------
+
+        print()
+        print(
+            "Calculating model-level anomaly indices...",
+            flush=True
+        )
+
         j_scores = {}
-        for class_id in range(self.num_classes):
-            indices = np.where(class_ids == class_id)[0]
+
+        for class_id in range(
+            self.num_classes
+        ):
+
+            print(
+                f"  Processing class "
+                f"{class_id + 1}/{self.num_classes}...",
+                flush=True
+            )
+
+            indices = np.where(
+                class_ids == class_id
+            )[0]
+
             if len(indices) == 0:
+
                 j_scores[class_id] = 0.0
+
                 continue
 
             class_flags = flags[indices]
-            flagged_indices = indices[class_flags]
-            normal_indices = indices[~class_flags]
 
-            # If there are flagged samples, compute KMMD between normal and flagged
-            if len(flagged_indices) > 0 and len(normal_indices) > 0:
-                norm_f = features[normal_indices].mean(dim=(2, 3)) if features.dim() == 4 else features[normal_indices]
-                flag_f = features[flagged_indices].mean(dim=(2, 3)) if features.dim() == 4 else features[flagged_indices]
-                kmmd = compute_kmmd_distance(norm_f, flag_f)
-                j_scores[class_id] = kmmd
-            elif len(flagged_indices) > 0 and class_id in self.clean_features_per_class:
-                # Compare against stored clean reference
-                clean_ref = self.clean_features_per_class[class_id]
-                clean_flat = clean_ref.mean(dim=(2, 3)) if clean_ref.dim() == 4 else clean_ref
-                flag_f = features[flagged_indices].mean(dim=(2, 3)) if features.dim() == 4 else features[flagged_indices]
-                kmmd = compute_kmmd_distance(clean_flat, flag_f)
-                j_scores[class_id] = kmmd
+            flagged_indices = (
+                indices[class_flags]
+            )
+
+            normal_indices = (
+                indices[~class_flags]
+            )
+
+            # ----------------------------------------------------------
+            # CASE 1:
+            # Both normal and flagged samples exist
+            # ----------------------------------------------------------
+
+            if (
+                len(flagged_indices) > 0
+                and len(normal_indices) > 0
+            ):
+
+                # Deterministic subsampling
+                normal_sample = normal_indices[
+                    :max_kmmd_samples
+                ]
+
+                flagged_sample = flagged_indices[
+                    :max_kmmd_samples
+                ]
+
+                norm_f = features[
+                    normal_sample
+                ]
+
+                flag_f = features[
+                    flagged_sample
+                ]
+
+                if norm_f.dim() == 4:
+
+                    norm_f = norm_f.mean(
+                        dim=(2, 3)
+                    )
+
+                if flag_f.dim() == 4:
+
+                    flag_f = flag_f.mean(
+                        dim=(2, 3)
+                    )
+
+                print(
+                    f"    Normal: {len(normal_sample)}, "
+                    f"Flagged: {len(flagged_sample)}",
+                    flush=True
+                )
+
+                kmmd = compute_kmmd_distance(
+                    norm_f,
+                    flag_f
+                )
+
+                j_scores[class_id] = float(
+                    kmmd
+                )
+
+            # ----------------------------------------------------------
+            # CASE 2:
+            # Flagged samples but no normal samples
+            # ----------------------------------------------------------
+
+            elif (
+                len(flagged_indices) > 0
+                and class_id
+                in self.clean_features_per_class
+            ):
+
+                clean_ref = (
+                    self.clean_features_per_class[
+                        class_id
+                    ]
+                )
+
+                clean_ref = clean_ref[
+                    :max_kmmd_samples
+                ]
+
+                flag_sample = flagged_indices[
+                    :max_kmmd_samples
+                ]
+
+                if clean_ref.dim() == 4:
+
+                    clean_ref = clean_ref.mean(
+                        dim=(2, 3)
+                    )
+
+                flag_f = features[
+                    flag_sample
+                ]
+
+                if flag_f.dim() == 4:
+
+                    flag_f = flag_f.mean(
+                        dim=(2, 3)
+                    )
+
+                kmmd = compute_kmmd_distance(
+                    clean_ref,
+                    flag_f
+                )
+
+                j_scores[class_id] = float(
+                    kmmd
+                )
+
+            # ----------------------------------------------------------
+            # CASE 3:
+            # No useful flagged/normal split
+            # ----------------------------------------------------------
+
             else:
-                # Discrepancy metric based on deviation magnitude
-                class_devs = scores[indices]
-                top_k = max(int(len(class_devs) * 0.1), 1)
-                j_scores[class_id] = float(np.mean(np.sort(class_devs)[-top_k:]))
 
-        # MAD analysis of J_c across classes (from NDSS 2023 Beatrix paper)
-        j_values = np.array([j_scores[c] for c in range(self.num_classes)], dtype=float)
-        j_median = float(np.median(j_values))
-        j_mad = float(np.median(np.abs(j_values - j_median)))
+                class_devs = scores[
+                    indices
+                ]
 
-        # J_star: anomaly index
-        j_star = np.abs(j_values - j_median) / (1.4826 * (j_mad + 1e-6))
-        class_anomaly_indices = {c: float(j_star[c]) for c in range(self.num_classes)}
+                if len(class_devs) == 0:
 
-        max_anomaly_index = float(np.max(j_star))
-        suspected_target = int(np.argmax(j_star))
+                    j_scores[class_id] = 0.0
 
-        # Decision rule: If max J* >= anomaly_threshold (default 2.0), model is backdoored
-        is_backdoored = bool(max_anomaly_index >= self.anomaly_threshold)
-        decision = "BACKDOOR" if is_backdoored else "CLEAN"
+                else:
 
-        # Map Anomaly Index to standardized confidence score in [0, 1] for Module 5
-        # Sigmoid centered at anomaly_threshold (2.0)
-        norm_score = float(1.0 / (1.0 + np.exp(-1.5 * (max_anomaly_index - self.anomaly_threshold))))
+                    top_k = max(
+                        int(len(class_devs) * 0.1),
+                        1
+                    )
 
-        backdoor_pct = float(flags.mean() * 100.0) if n else 0.0
-        avg_thresh = float(used_thresholds.mean()) if n else 0.0
+                    j_scores[class_id] = float(
+                        np.mean(
+                            np.sort(class_devs)[
+                                -top_k:
+                            ]
+                        )
+                    )
+
+        # --------------------------------------------------------------
+        # 3. MAD-BASED J* CALCULATION
+        # --------------------------------------------------------------
+
+        j_values = np.array(
+            [
+                j_scores[c]
+                for c in range(
+                    self.num_classes
+                )
+            ],
+            dtype=float
+        )
+
+        j_median = float(
+            np.median(j_values)
+        )
+
+        j_mad = float(
+            np.median(
+                np.abs(
+                    j_values - j_median
+                )
+            )
+        )
+
+        j_star = (
+            np.abs(
+                j_values - j_median
+            )
+            /
+            (
+                1.4826
+                * (j_mad + 1e-6)
+            )
+        )
+
+        class_anomaly_indices = {
+            c: float(j_star[c])
+            for c in range(
+                self.num_classes
+            )
+        }
+
+        max_anomaly_index = float(
+            np.max(j_star)
+        )
+
+        suspected_target = int(
+            np.argmax(j_star)
+        )
+
+        # --------------------------------------------------------------
+        # 4. FINAL DECISION
+        # --------------------------------------------------------------
+
+        is_backdoored = bool(
+            max_anomaly_index
+            >= self.anomaly_threshold
+        )
+
+        decision = (
+            "BACKDOOR"
+            if is_backdoored
+            else "CLEAN"
+        )
+
+        # --------------------------------------------------------------
+        # 5. NORMALIZED SCORE
+        # --------------------------------------------------------------
+
+        norm_score = float(
+            1.0
+            /
+            (
+                1.0
+                + np.exp(
+                    -1.5
+                    * (
+                        max_anomaly_index
+                        - self.anomaly_threshold
+                    )
+                )
+            )
+        )
+
+        backdoor_pct = (
+            float(flags.mean() * 100.0)
+            if n
+            else 0.0
+        )
+
+        avg_thresh = (
+            float(used_thresholds.mean())
+            if n
+            else 0.0
+        )
+
+        print()
+        print(
+            "Beatrix detection complete.",
+            flush=True
+        )
+
+        print(
+            f"Maximum J*       : "
+            f"{max_anomaly_index:.4f}",
+            flush=True
+        )
+
+        print(
+            f"Threshold        : "
+            f"{self.anomaly_threshold:.4f}",
+            flush=True
+        )
+
+        print(
+            f"Decision         : "
+            f"{decision}",
+            flush=True
+        )
+
+        print(
+            f"Suspected target : "
+            f"{suspected_target if is_backdoored else 'None'}",
+            flush=True
+        )
+
+        print(
+            f"Flagged samples  : "
+            f"{int(flags.sum())}/{n} "
+            f"({backdoor_pct:.2f}%)",
+            flush=True
+        )
+
+        # --------------------------------------------------------------
+        # 6. RETURN RESULT
+        # --------------------------------------------------------------
 
         return BeatrixResult(
             is_backdoored=is_backdoored,
             decision=decision,
             score=norm_score,
-            suspected_target_class=suspected_target if is_backdoored else None,
+            suspected_target_class=(
+                suspected_target
+                if is_backdoored
+                else None
+            ),
             anomaly_index=max_anomaly_index,
-            class_anomaly_indices=class_anomaly_indices,
+            class_anomaly_indices=(
+                class_anomaly_indices
+            ),
             scores=scores,
             flags=flags,
             backdoor_percentage=backdoor_pct,
             threshold=avg_thresh,
             predictions=class_ids,
-            true_labels=labels.detach().cpu().numpy() if torch.is_tensor(labels) else (np.asarray(labels) if labels is not None else np.full(n, -1)),
+            true_labels=(
+                labels.detach().cpu().numpy()
+                if torch.is_tensor(labels)
+                else (
+                    np.asarray(labels)
+                    if labels is not None
+                    else np.full(
+                        n,
+                        -1
+                    )
+                )
+            ),
             metrics={}
         )
+
 
     # ------------------------------------------------------------------
     # Performance Evaluation Utility
